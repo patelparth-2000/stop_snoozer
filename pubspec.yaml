@@ -1,0 +1,35 @@
+name: stop_snoozer
+description: "StopSnoozer – Never sleep through your stop again."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  provider: ^6.1.2
+  flutter_bloc: ^9.1.1
+  bloc: ^9.0.0
+  go_router: ^14.2.7
+  sqflite: ^2.3.3+2
+  path: ^1.9.0
+  path_provider: ^2.1.4
+  geolocator: ^12.0.0
+  permission_handler: ^11.3.1
+  google_fonts: ^6.2.1
+  equatable: ^2.0.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
+    - assets/data/
