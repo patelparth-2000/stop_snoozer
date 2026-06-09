@@ -1,5 +1,5 @@
 name: stop_snoozer
-description: "StopSnoozer – Never sleep through your stop again."
+description: "StopSnoozer – Never Miss Your Stop Again."
 publish_to: 'none'
 
 version: 1.0.0+1
@@ -33,3 +33,4 @@ flutter:
   assets:
     - assets/images/
     - assets/data/
+    - assets/uk.db.gz
