@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../data/models/stop_point.dart';
 import '../../presentation/splash/splash_screen.dart';
 import '../../presentation/splash/splash_viewmodel.dart';
+import '../../data/blocs/database_init_handler.dart';
 import '../../presentation/dashboard/dashboard_screen.dart';
 import '../../presentation/dashboard/dashboard_viewmodel.dart';
 import '../../presentation/search/search_screen.dart';
@@ -27,8 +28,14 @@ final appRouter = GoRouter(
       path: '/splash',
       pageBuilder: (context, state) => _page(
         state,
-        BlocProvider(
-          create: (_) => SplashCubit(),
+        MultiBlocProvider(
+          providers: [
+            BlocProvider(
+              create: (_) => DatabaseInitHandler()
+                ..add(const CheckDatabaseOnBootEvent()),
+            ),
+            BlocProvider(create: (_) => SplashCubit()),
+          ],
           child: const SplashScreen(),
         ),
       ),
