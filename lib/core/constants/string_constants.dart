@@ -1,7 +1,7 @@
 abstract final class StringConstants {
   // App
   static const String appName    = 'StopSnoozer';
-  static const String appTagline = 'Never Sleep Through Your Stop Again';
+  static const String appTagline = 'Never Miss Your Stop Again';
 
   // Splash
   static const String splashInitialising      = 'Initialising System…';
@@ -36,11 +36,17 @@ abstract final class StringConstants {
   static const String dashboardLegComplete       = 'COMPLETE';
 
   // Search
-  static const String searchHint          = 'Where are you falling asleep to? (e.g. Stratford, Victoria…)';
+  static const String searchHint          = 'Where do you need to be? We\'ll make sure you don\'t miss it. (e.g. Stratford, Victoria…)';
   static const String searchPlaceholder   = 'Search for a stop';
   static const String searchPlaceholderSub = 'Start typing a station, stop or area';
-  static const String searchNoResults     = 'No stops found for';
-  static const String searchMiles         = 'mi';
+  static const String searchNoResults          = 'No stops found for';
+  static const String searchMiles              = 'mi';
+  static const String searchPostcodeNotFound   = 'Postcode not found — check spelling and try again';
+  static const String searchPostcodeHint       = 'Postcode detected — showing nearest stops';
+  static const String searchFilterAll          = 'All';
+  static const String searchFilterBus          = 'Bus';
+  static const String searchFilterTube         = 'Tube & DLR';
+  static const String searchFilterRail         = 'Rail';
 
   // Trip Config
   static const String tripConfigTitle    = 'Review Your Trip Playlist';
