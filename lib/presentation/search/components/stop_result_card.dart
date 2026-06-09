@@ -12,13 +12,21 @@ class StopResultCard extends StatelessWidget {
     super.key,
     required this.stop,
     required this.onTap,
+    this.showIndicator = false,
   });
 
   final StopPoint stop;
   final VoidCallback onTap;
+  /// When true the indicator badge is shown to disambiguate duplicate names.
+  final bool showIndicator;
 
   @override
   Widget build(BuildContext context) {
+    final indicator = stop.indicator?.trim();
+    final hasIndicator = showIndicator &&
+        indicator != null &&
+        indicator.isNotEmpty;
+
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -39,13 +47,26 @@ class StopResultCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    stop.name,
-                    style: GoogleFonts.sora(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: ColorConstants.textPrimary,
-                    ),
+                  // Name row with optional indicator badge
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          stop.name,
+                          style: GoogleFonts.sora(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: ColorConstants.textPrimary,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (hasIndicator) ...[
+                        const SizedBox(width: AppConstants.spaceSm),
+                        _IndicatorBadge(label: indicator),
+                      ],
+                    ],
                   ),
                   const SizedBox(height: 2),
                   Text(
@@ -58,7 +79,8 @@ class StopResultCard extends StatelessWidget {
                 ],
               ),
             ),
-            if (stop.distanceKm != null)
+            if (stop.distanceKm != null) ...[
+              const SizedBox(width: AppConstants.spaceSm),
               Text(
                 '${NumberFormatters.miles(stop.distanceKm!)} ${StringConstants.searchMiles}',
                 style: GoogleFonts.inter(
@@ -66,6 +88,7 @@ class StopResultCard extends StatelessWidget {
                   color: ColorConstants.textDisabled,
                 ),
               ),
+            ],
             const SizedBox(width: AppConstants.spaceSm),
             const Icon(
               Icons.add_circle_outline_rounded,
@@ -73,6 +96,31 @@ class StopResultCard extends StatelessWidget {
               size: 20,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _IndicatorBadge extends StatelessWidget {
+  const _IndicatorBadge({required this.label});
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: ColorConstants.primarySubtle,
+        borderRadius: BorderRadius.circular(AppConstants.radiusSm),
+        border: Border.all(color: ColorConstants.primaryGlow, width: 1),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.inter(
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          color: ColorConstants.primary,
         ),
       ),
     );
