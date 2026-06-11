@@ -14,6 +14,9 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"
+        android:maxSdkVersion="32" />
 
     <application
         android:label="StopSnoozer"
@@ -48,7 +51,23 @@
         <service
             android:name=".SnoozeTrackingService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="location" />
+
+        <!-- ── Commute Alarm BroadcastReceiver ────────────────────── -->
+        <receiver
+            android:name=".CommuteAlarmReceiver"
+            android:exported="false" />
+
+        <!-- ── Boot receiver — re-schedules alarms after reboot ───── -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
         <!-- Flutter embedding metadata -->
         <meta-data
