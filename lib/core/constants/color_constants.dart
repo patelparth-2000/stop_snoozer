@@ -30,10 +30,11 @@ abstract final class ColorConstants {
   static const Color scrim            = Color(0xCC0F131D);
   static const Color divider          = Color(0xFF262A35);
 
-  // Transport mode icon tints
-  static const Color transportTube       = Color(0xFF4DD0E1);
-  static const Color transportBus        = Color(0xFFEF9A9A);
-  static const Color transportRail       = Color(0xFF90CAF9);
-  static const Color transportDlr        = Color(0xFFA5D6A7);
-  static const Color transportOverground = Color(0xFFFFCC80);
+  // Transport mode icon tints — spec-mandated neon transit indicator colours
+  static const Color transportTube       = Color(0xFF10B981); // Mint Green – subway/metro
+  static const Color transportBus        = Color(0xFFFF6B6B); // Coral Red  – road/bus
+  static const Color transportRail       = Color(0xFF38BDF8); // Sky Blue   – national rail
+  static const Color transportDlr        = Color(0xFF10B981); // Mint Green – DLR (metro-family)
+  static const Color transportOverground = Color(0xFF38BDF8); // Sky Blue   – overground (rail-family)
+  static const Color transportTram       = Color(0xFF10B981); // Mint Green – tram
 }
