@@ -15,24 +15,28 @@ import '../../presentation/alarm/alarm_screen.dart';
 import '../../presentation/alarm/alarm_viewmodel.dart';
 import '../../presentation/system_health/system_health_screen.dart';
 import '../../presentation/system_health/system_health_viewmodel.dart';
+import '../../presentation/calendar/calendar_screen.dart';
+import '../../presentation/calendar/calendar_viewmodel.dart';
+import '../shell/app_shell.dart';
 
-// Long-lived Cubits shared across navigation events
+// Long-lived Cubits shared across the entire shell
 final _dashboardCubit  = DashboardCubit();
 final _tripConfigCubit = TripConfigCubit();
+final _calendarCubit   = CommuteAlarmsCubit();
 
 final appRouter = GoRouter(
   initialLocation: '/splash',
   routes: [
-    // ── Splash ────────────────────────────────────────────────────────────
+    // ── Full-screen takeovers (no bottom nav) ─────────────────────────────
     GoRoute(
       path: '/splash',
-      pageBuilder: (context, state) => _page(
+      pageBuilder: (context, state) => _fade(
         state,
         MultiBlocProvider(
           providers: [
             BlocProvider(
-              create: (_) => DatabaseInitHandler()
-                ..add(const CheckDatabaseOnBootEvent()),
+              create: (_) =>
+                  DatabaseInitHandler()..add(const CheckDatabaseOnBootEvent()),
             ),
             BlocProvider(create: (_) => SplashCubit()),
           ],
@@ -41,85 +45,119 @@ final appRouter = GoRouter(
       ),
     ),
 
-    // ── Dashboard ─────────────────────────────────────────────────────────
-    GoRoute(
-      path: '/dashboard',
-      pageBuilder: (context, state) => _page(
-        state,
-        MultiBlocProvider(
-          providers: [
-            BlocProvider.value(value: _dashboardCubit),
-            BlocProvider.value(value: _tripConfigCubit),
-          ],
-          child: const DashboardScreen(),
-        ),
-      ),
-    ),
-
-    // ── Search ────────────────────────────────────────────────────────────
-    GoRoute(
-      path: '/search',
-      pageBuilder: (context, state) => _page(
-        state,
-        MultiBlocProvider(
-          providers: [
-            BlocProvider(create: (_) => SearchCubit()),
-            BlocProvider.value(value: _tripConfigCubit),
-          ],
-          child: const SearchScreen(),
-        ),
-      ),
-    ),
-
-    // ── Trip Config ───────────────────────────────────────────────────────
-    GoRoute(
-      path: '/trip-config',
-      pageBuilder: (context, state) => _page(
-        state,
-        MultiBlocProvider(
-          providers: [
-            BlocProvider.value(value: _tripConfigCubit),
-            BlocProvider.value(value: _dashboardCubit),
-          ],
-          child: const TripConfigScreen(),
-        ),
-      ),
-    ),
-
-    // ── Active Alarm ──────────────────────────────────────────────────────
     GoRoute(
       path: '/alarm',
       pageBuilder: (context, state) {
-        final extra    = state.extra as Map<String, dynamic>?;
-        final stop     = extra?['stop']     as StopPoint? ?? _fallbackStop();
-        final distance = (extra?['distance'] as num?)?.toDouble() ?? 400.0;
-        return _page(
+        final extra         = state.extra as Map<String, dynamic>?;
+        final stop          = extra?['stop']          as StopPoint? ?? _fallbackStop();
+        final distance      = (extra?['distance']     as num?)?.toDouble() ?? 400.0;
+        final firedAt       = (extra?['firedAt']      as num?)?.toInt() ?? 0;
+        final countdownSecs = (extra?['countdownSecs'] as num?)?.toInt() ?? 5;
+
+        int initialCountdown = 0;
+        if (firedAt > 0) {
+          final elapsed = (DateTime.now().millisecondsSinceEpoch - firedAt) ~/ 1000;
+          initialCountdown = (countdownSecs - elapsed).clamp(0, countdownSecs);
+        }
+
+        return _fade(
           state,
           BlocProvider(
-            create: (_) => AlarmCubit(stop: stop, distanceMetres: distance),
+            create: (_) => AlarmCubit(
+              stop: stop,
+              distanceMetres: distance,
+              initialCountdown: initialCountdown,
+              onDismissed: _dashboardCubit.advanceLeg,
+            ),
             child: const AlarmScreen(),
           ),
         );
       },
     ),
 
-    // ── System Health ─────────────────────────────────────────────────────
-    GoRoute(
-      path: '/system-health',
-      pageBuilder: (context, state) => _page(
-        state,
-        BlocProvider(
-          create: (_) => SystemHealthCubit(),
-          child: const SystemHealthScreen(),
-        ),
+    // ── Shell with persistent BottomNavigationBar ─────────────────────────
+    StatefulShellRoute.indexedStack(
+      builder: (context, state, navigationShell) => MultiBlocProvider(
+        providers: [
+          BlocProvider.value(value: _dashboardCubit),
+          BlocProvider.value(value: _tripConfigCubit),
+          BlocProvider.value(value: _calendarCubit),
+        ],
+        child: AppShell(navigationShell: navigationShell),
       ),
+      branches: [
+        // Tab 1 – Dashboard
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/dashboard',
+              pageBuilder: (context, state) =>
+                  _fade(state, const DashboardScreen()),
+            ),
+          ],
+        ),
+
+        // Tab 2 – Search
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/search',
+              pageBuilder: (context, state) => _fade(
+                state,
+                BlocProvider(
+                  create: (_) => SearchCubit(),
+                  child: const SearchScreen(),
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        // Tab 3 – Trip Queue (formerly /trip-config)
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/queue',
+              pageBuilder: (context, state) =>
+                  _fade(state, const TripConfigScreen()),
+            ),
+          ],
+        ),
+
+        // Tab 4 – Alarms / Commute Schedule
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/calendar',
+              pageBuilder: (context, state) =>
+                  _fade(state, const CalendarScreen()),
+            ),
+          ],
+        ),
+
+        // Tab 5 – Settings (formerly /system-health)
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/settings',
+              pageBuilder: (context, state) => _fade(
+                state,
+                BlocProvider(
+                  create: (_) => SystemHealthCubit(),
+                  child: const SystemHealthScreen(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
     ),
   ],
 );
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-CustomTransitionPage<void> _page(GoRouterState state, Widget child) =>
+CustomTransitionPage<void> _fade(GoRouterState state, Widget child) =>
     CustomTransitionPage<void>(
       key: state.pageKey,
       child: child,
