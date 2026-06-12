@@ -7,13 +7,13 @@ class DashboardAppBar extends StatelessWidget {
   const DashboardAppBar({
     super.key,
     required this.greeting,
-    required this.timeString,
     this.onHealthTap,
+    this.onCalendarTap,
   });
 
   final String greeting;
-  final String timeString;
   final VoidCallback? onHealthTap;
+  final VoidCallback? onCalendarTap;
 
   @override
   Widget build(BuildContext context) {
@@ -30,16 +30,6 @@ class DashboardAppBar extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  timeString,
-                  style: GoogleFonts.sora(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: ColorConstants.primary,
-                    letterSpacing: 0.1,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
                   greeting,
                   style: GoogleFonts.sora(
                     fontSize: 16,
@@ -52,6 +42,23 @@ class DashboardAppBar extends StatelessWidget {
             ),
           ),
           GestureDetector(
+            onTap: onCalendarTap,
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: ColorConstants.surfaceSecondary,
+                borderRadius: BorderRadius.circular(AppConstants.radiusMd),
+              ),
+              child: const Icon(
+                Icons.alarm_rounded,
+                color: ColorConstants.primary,
+                size: 20,
+              ),
+            ),
+          ),
+          const SizedBox(width: AppConstants.spaceSm),
+          GestureDetector(
             onTap: onHealthTap,
             child: Container(
               width: 40,
@@ -61,7 +68,7 @@ class DashboardAppBar extends StatelessWidget {
                 borderRadius: BorderRadius.circular(AppConstants.radiusMd),
               ),
               child: const Icon(
-                Icons.monitor_heart_outlined,
+                Icons.settings_outlined,
                 color: ColorConstants.textSecondary,
                 size: 20,
               ),
