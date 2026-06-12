@@ -83,6 +83,8 @@ class StopPoint extends Equatable {
     }
   }
 
+  String get transitTypeString => _modeToTransitType(mode);
+
   Map<String, dynamic> toMap() => {
         'id': id,
         'name': name,
