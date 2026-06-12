@@ -13,6 +13,10 @@ abstract final class StringConstants {
   static const String splashPermLocationDesc  = 'Required for GPS geofencing above ground';
   static const String splashPermNotification  = 'Notifications';
   static const String splashPermNotifDesc     = 'To alert you when approaching your stop';
+  static const String splashPermBgLocation    = 'Background Location';
+  static const String splashPermBgLocationDesc = 'Must be "Allow all the time" — required for alarms to fire when the app is closed. After granting precise location, you\'ll be taken to App Settings to enable this.';
+  static const String splashPermFullScreen    = 'Alarm Display';
+  static const String splashPermFullScreenDesc = 'Required on Android 14+ to show the alarm over the lock screen and above other apps. You\'ll be taken to App Settings to enable this.';
   static const String splashPermBattery       = 'Battery Optimisation Exemption';
   static const String splashPermBatteryDesc   = 'Prevents the OS from killing the tracking service';
   static const String splashPermContinue      = 'Grant Permissions & Continue';
