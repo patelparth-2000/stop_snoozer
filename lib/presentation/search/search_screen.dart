@@ -7,6 +7,7 @@ import 'components/search_omnibar.dart';
 import 'components/search_filter_bar.dart';
 import 'components/stop_result_card.dart';
 import '../../core/constants/color_constants.dart';
+import '../../core/theme/theme_scope.dart';
 import '../../core/constants/string_constants.dart';
 import '../../core/constants/app_constants.dart';
 import '../../data/models/stop_point.dart';
@@ -36,56 +37,64 @@ class _SearchScreenState extends State<SearchScreen> {
 
   void _onStopSelected(StopPoint stop) {
     context.read<TripConfigCubit>().addLeg(stop);
-    context.push('/trip-config');
+    context.go('/queue');
+  }
+
+  void _onBack() {
+    final hasLegs = context.read<TripConfigCubit>().state.hasLegs;
+    context.go(hasLegs ? '/queue' : '/dashboard');
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: ColorConstants.surfaceBase,
-      body: BlocBuilder<SearchCubit, SearchState>(
-        builder: (context, state) => SafeArea(
-          child: Column(
-            children: [
-              SearchOmnibar(
-                controller: _ctrl,
-                onChanged: context.read<SearchCubit>().onQueryChanged,
-                onBack: () => context.pop(),
-                isSearching: state.isSearching,
-              ),
-              // Filter chips
-              const SizedBox(height: AppConstants.spaceSm),
-              SearchFilterBar(
-                activeFilter: state.activeFilter,
-                onFilterChanged: context.read<SearchCubit>().setFilter,
-              ),
-              const SizedBox(height: AppConstants.spaceSm),
-              // Postcode mode / error banner
-              if (state.isPostcodeMode && state.postcodeError == null)
-                _ModeBanner(
-                  message: StringConstants.searchPostcodeHint,
-                  color: ColorConstants.primaryGlow,
-                  icon: Icons.location_on_outlined,
+    ThemeScope.watch(context);
+    return BlocListener<SearchCubit, SearchState>(
+      listenWhen: (prev, curr) => prev.hasQuery && !curr.hasQuery,
+      listener: (_, _) => _ctrl.clear(),
+      child: Scaffold(
+        backgroundColor: ColorConstants.surfaceBase,
+        body: BlocBuilder<SearchCubit, SearchState>(
+          builder: (context, state) => SafeArea(
+            child: Column(
+              children: [
+                SearchOmnibar(
+                  controller: _ctrl,
+                  onChanged: context.read<SearchCubit>().onQueryChanged,
+                  isSearching: state.isSearching,
+                  onBack: _onBack,
                 ),
-              if (state.postcodeError != null)
-                _ModeBanner(
-                  message: state.postcodeError!,
-                  color: Colors.red.withAlpha(60),
-                  icon: Icons.error_outline_rounded,
-                  textColor: Colors.red.shade300,
+                const SizedBox(height: AppConstants.spaceSm),
+                SearchFilterBar(
+                  activeFilter: state.activeFilter,
+                  onFilterChanged: context.read<SearchCubit>().setFilter,
                 ),
-              const Divider(height: 1),
-              Expanded(
-                child: state.hasQuery
-                    ? _ResultList(
-                        results: state.results,
-                        query: state.query,
-                        duplicateNames: state.duplicateNames,
-                        onTap: _onStopSelected,
-                      )
-                    : const _PlaceholderState(),
-              ),
-            ],
+                const SizedBox(height: AppConstants.spaceSm),
+                if (state.isPostcodeMode && state.postcodeError == null)
+                  _ModeBanner(
+                    message: StringConstants.searchPostcodeHint,
+                    color: ColorConstants.primaryGlow,
+                    icon: Icons.location_on_outlined,
+                  ),
+                if (state.postcodeError != null)
+                  _ModeBanner(
+                    message: state.postcodeError!,
+                    color: Colors.red.withAlpha(60),
+                    icon: Icons.error_outline_rounded,
+                    textColor: Colors.red.shade300,
+                  ),
+                const Divider(height: 1),
+                Expanded(
+                  child: state.hasQuery
+                      ? _ResultList(
+                          results: state.results,
+                          query: state.query,
+                          duplicateNames: state.duplicateNames,
+                          onTap: _onStopSelected,
+                        )
+                      : const _PlaceholderState(),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -166,7 +175,7 @@ class _ResultList extends StatelessWidget {
       return Center(
         child: Text(
           '${StringConstants.searchNoResults} "$query"',
-          style: const TextStyle(
+          style: TextStyle(
             color: ColorConstants.textSecondary,
             fontSize: 13,
           ),
@@ -182,6 +191,7 @@ class _ResultList extends StatelessWidget {
           stop: stop,
           onTap: () => onTap(stop),
           showIndicator: duplicateNames.contains(stop.name),
+          query: query,
         );
       },
     );
@@ -199,7 +209,7 @@ class _PlaceholderState extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
+          Icon(
             Icons.search_rounded,
             color: ColorConstants.textDisabled,
             size: 48,
@@ -207,7 +217,7 @@ class _PlaceholderState extends StatelessWidget {
           const SizedBox(height: AppConstants.spaceMd),
           Text(
             StringConstants.searchPlaceholder,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 15,
               fontWeight: FontWeight.w600,
               color: ColorConstants.textSecondary,
@@ -216,7 +226,7 @@ class _PlaceholderState extends StatelessWidget {
           const SizedBox(height: AppConstants.spaceXs),
           Text(
             StringConstants.searchPlaceholderSub,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 13,
               color: ColorConstants.textDisabled,
             ),
