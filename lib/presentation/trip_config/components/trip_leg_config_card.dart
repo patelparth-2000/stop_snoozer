@@ -5,7 +5,6 @@ import '../../../core/constants/app_constants.dart';
 import '../../../data/models/trip_leg.dart';
 import '../../shared/widgets/transport_mode_icon.dart';
 import 'wake_radius_slider.dart';
-import 'alarm_style_toggle.dart';
 
 class TripLegConfigCard extends StatefulWidget {
   const TripLegConfigCard({
@@ -13,14 +12,12 @@ class TripLegConfigCard extends StatefulWidget {
     required this.leg,
     required this.index,
     required this.onRadiusChanged,
-    required this.onStyleChanged,
     required this.onRemove,
   });
 
   final TripLeg leg;
   final int index;
   final void Function(double) onRadiusChanged;
-  final void Function(AlarmStyle) onStyleChanged;
   final VoidCallback onRemove;
 
   @override
@@ -37,9 +34,16 @@ class _TripLegConfigCardState extends State<TripLegConfigCard> {
         horizontal: AppConstants.containerMargin,
         vertical: AppConstants.spaceXs,
       ),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: ColorConstants.surfaceSecondary,
         borderRadius: BorderRadius.circular(AppConstants.radiusLg),
+        border: Border(
+          left:   BorderSide(color: ColorConstants.primary, width: 3),
+          top:    BorderSide(color: ColorConstants.surfaceElevated),
+          right:  BorderSide(color: ColorConstants.surfaceElevated),
+          bottom: BorderSide(color: ColorConstants.surfaceElevated),
+        ),
       ),
       child: Column(
         children: [
@@ -53,7 +57,12 @@ class _TripLegConfigCardState extends State<TripLegConfigCard> {
           AnimatedSize(
             duration: const Duration(milliseconds: AppConstants.durationNormal),
             curve: Curves.easeInOut,
-            child: _expanded ? _Body(leg: widget.leg, onRadiusChanged: widget.onRadiusChanged, onStyleChanged: widget.onStyleChanged) : const SizedBox.shrink(),
+            child: _expanded
+                ? _Body(
+                    leg: widget.leg,
+                    onRadiusChanged: widget.onRadiusChanged,
+                  )
+                : const SizedBox.shrink(),
           ),
         ],
       ),
@@ -80,11 +89,20 @@ class _Header extends StatelessWidget {
     return GestureDetector(
       onTap: onToggle,
       child: Padding(
-        padding: const EdgeInsets.all(AppConstants.spaceMd),
+        padding: const EdgeInsets.fromLTRB(
+          AppConstants.spaceMd,
+          AppConstants.spaceMd,
+          AppConstants.spaceSm,
+          AppConstants.spaceMd,
+        ),
         child: Row(
           children: [
-            const Icon(Icons.drag_handle_rounded, color: ColorConstants.textDisabled, size: 20),
-            const SizedBox(width: AppConstants.spaceSm),
+            Icon(
+              Icons.drag_indicator_rounded,
+              color: ColorConstants.textDisabled,
+              size: 20,
+            ),
+            const SizedBox(width: AppConstants.spaceXs),
             TransportModeIcon(mode: leg.stop.mode, size: 36),
             const SizedBox(width: AppConstants.spaceMd),
             Expanded(
@@ -92,14 +110,15 @@ class _Header extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Leg ${index + 1}',
+                    'LEG ${index + 1}',
                     style: GoogleFonts.sora(
-                      fontSize: 10,
+                      fontSize: 9,
                       fontWeight: FontWeight.w700,
                       color: ColorConstants.primary,
-                      letterSpacing: 0.15,
+                      letterSpacing: 0.6,
                     ),
                   ),
+                  const SizedBox(height: 1),
                   Text(
                     leg.stop.name,
                     style: GoogleFonts.sora(
@@ -107,18 +126,34 @@ class _Header extends StatelessWidget {
                       fontWeight: FontWeight.w600,
                       color: ColorConstants.textPrimary,
                     ),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ],
               ),
             ),
+            const SizedBox(width: AppConstants.spaceXs),
             GestureDetector(
               onTap: onRemove,
-              child: const Icon(Icons.remove_circle_outline_rounded, color: ColorConstants.error, size: 20),
+              child: Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(
+                  color: ColorConstants.error.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(AppConstants.radiusSm),
+                ),
+                child: const Icon(
+                  Icons.close_rounded,
+                  color: ColorConstants.error,
+                  size: 16,
+                ),
+              ),
             ),
-            const SizedBox(width: AppConstants.spaceSm),
+            const SizedBox(width: AppConstants.spaceXs),
             Icon(
-              expanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
-              color: ColorConstants.textSecondary,
+              expanded
+                  ? Icons.keyboard_arrow_up_rounded
+                  : Icons.keyboard_arrow_down_rounded,
+              color: ColorConstants.textDisabled,
               size: 20,
             ),
           ],
@@ -132,11 +167,9 @@ class _Body extends StatelessWidget {
   const _Body({
     required this.leg,
     required this.onRadiusChanged,
-    required this.onStyleChanged,
   });
   final TripLeg leg;
   final void Function(double) onRadiusChanged;
-  final void Function(AlarmStyle) onStyleChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -149,11 +182,9 @@ class _Body extends StatelessWidget {
       ),
       child: Column(
         children: [
-          const Divider(height: 1),
+          Divider(height: 1, color: ColorConstants.surfaceElevated),
           const SizedBox(height: AppConstants.spaceMd),
           WakeRadiusSlider(value: leg.wakeRadiusMetres, onChanged: onRadiusChanged),
-          const SizedBox(height: AppConstants.spaceMd),
-          AlarmStyleToggle(value: leg.alarmStyle, onChanged: onStyleChanged),
         ],
       ),
     );
