@@ -60,7 +60,7 @@ class _EmptyTrip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: AppConstants.containerMargin),
       child: Column(
         children: [
-          const Icon(
+          Icon(
             Icons.route_outlined,
             color: ColorConstants.textDisabled,
             size: 40,

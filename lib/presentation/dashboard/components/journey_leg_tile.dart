@@ -26,58 +26,82 @@ class JourneyLegTile extends StatelessWidget {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _TimelineColumn(isActive: isActive, isComplete: isComplete, isLast: isLast),
+        _TimelineColumn(
+            isActive: isActive, isComplete: isComplete, isLast: isLast),
         const SizedBox(width: AppConstants.spaceMd),
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.only(bottom: AppConstants.spaceLg),
+            padding:
+                const EdgeInsets.only(bottom: AppConstants.spaceLg),
             child: Container(
-              padding: const EdgeInsets.all(AppConstants.spaceMd),
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 color: isActive
                     ? ColorConstants.primarySubtle
                     : ColorConstants.surfaceSecondary,
-                borderRadius: BorderRadius.circular(AppConstants.radiusMd),
-                border: isActive
-                    ? Border.all(color: ColorConstants.primaryGlow, width: 1)
-                    : null,
+                borderRadius:
+                    BorderRadius.circular(AppConstants.radiusMd),
+                border: Border(
+                  left: isActive
+                      ? BorderSide(
+                          color: ColorConstants.primary, width: 3)
+                      : BorderSide(
+                          color: ColorConstants.surfaceElevated),
+                  top:    BorderSide(
+                      color: ColorConstants.surfaceElevated),
+                  right:  BorderSide(
+                      color: ColorConstants.surfaceElevated),
+                  bottom: BorderSide(
+                      color: ColorConstants.surfaceElevated),
+                ),
                 boxShadow: isActive
-                    ? [BoxShadow(color: ColorConstants.primaryGlow, blurRadius: 12)]
+                    ? [
+                        BoxShadow(
+                          color: ColorConstants.primaryGlow,
+                          blurRadius: 16,
+                        ),
+                      ]
                     : null,
               ),
-              child: Row(
-                children: [
-                  TransportModeIcon(mode: leg.stop.mode, size: 36),
-                  const SizedBox(width: AppConstants.spaceMd),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          leg.stop.name,
-                          style: GoogleFonts.sora(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: isActive
-                                ? ColorConstants.primary
-                                : isComplete
-                                    ? ColorConstants.textDisabled
-                                    : ColorConstants.textPrimary,
+              child: Padding(
+                padding: const EdgeInsets.all(AppConstants.spaceMd),
+                child: Row(
+                  children: [
+                    TransportModeIcon(
+                        mode: leg.stop.mode,
+                        size: 36),
+                    const SizedBox(width: AppConstants.spaceMd),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            leg.stop.name,
+                            style: GoogleFonts.sora(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: isActive
+                                  ? ColorConstants.primary
+                                  : isComplete
+                                      ? ColorConstants.textDisabled
+                                      : ColorConstants.textPrimary,
+                            ),
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${leg.wakeRadiusMetres.round()} ${StringConstants.tripConfigMetres} radius',
-                          style: GoogleFonts.inter(
-                            fontSize: 11,
-                            color: ColorConstants.textSecondary,
+                          const SizedBox(height: 2),
+                          Text(
+                            '${leg.wakeRadiusMetres.round()} ${StringConstants.tripConfigMetres} wake radius',
+                            style: GoogleFonts.inter(
+                              fontSize: 11,
+                              color: ColorConstants.textDisabled,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  _StatusBadge(status: leg.status),
-                ],
+                    _StatusBadge(status: leg.status),
+                  ],
+                ),
               ),
             ),
           ),
@@ -116,17 +140,35 @@ class _TimelineColumn extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: dotColor,
-              boxShadow: isActive
-                  ? [BoxShadow(color: ColorConstants.primaryGlow, blurRadius: 8)]
+              border: !isActive && !isComplete
+                  ? Border.all(color: ColorConstants.divider, width: 1)
                   : null,
+              boxShadow: isActive
+                  ? [BoxShadow(color: ColorConstants.primaryGlow, blurRadius: 10)]
+                  : isComplete
+                      ? [BoxShadow(color: ColorConstants.successGlow, blurRadius: 6)]
+                      : null,
             ),
           ),
-          if (!isLast)
+          if (!isLast) ...[
+            const SizedBox(height: 4),
             Container(
-              width: 2,
-              height: 64,
-              color: ColorConstants.divider,
+              width: 1,
+              height: 60,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    isActive || isComplete
+                        ? ColorConstants.divider
+                        : ColorConstants.surfaceElevated,
+                    ColorConstants.surfaceElevated,
+                  ],
+                ),
+              ),
             ),
+          ],
         ],
       ),
     );
@@ -146,12 +188,11 @@ class _StatusBadge extends StatelessWidget {
     };
     return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: AppConstants.spaceSm,
-        vertical: AppConstants.spaceXs,
-      ),
+          horizontal: AppConstants.spaceSm, vertical: AppConstants.spaceXs),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(AppConstants.radiusFull),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
       ),
       child: Text(
         label,
@@ -159,7 +200,7 @@ class _StatusBadge extends StatelessWidget {
           fontSize: 9,
           fontWeight: FontWeight.w700,
           color: color,
-          letterSpacing: 0.1,
+          letterSpacing: 0.4,
         ),
       ),
     );
