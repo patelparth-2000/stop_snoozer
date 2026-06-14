@@ -6,62 +6,70 @@ import 'components/splash_logo_widget.dart';
 import 'components/splash_progress_bar.dart';
 import 'components/splash_permission_sheet.dart';
 import '../../core/constants/color_constants.dart';
+import '../../data/blocs/database_init_handler.dart';
 
-class SplashScreen extends StatefulWidget {
+class SplashScreen extends StatelessWidget {
   const SplashScreen({super.key});
-
-  @override
-  State<SplashScreen> createState() => _SplashScreenState();
-}
-
-class _SplashScreenState extends State<SplashScreen> {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<SplashCubit>().initialize();
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: ColorConstants.surfaceBase,
-      body: BlocConsumer<SplashCubit, SplashState>(
-        listener: (context, state) {
-          if (state.phase == SplashPhase.ready) {
-            context.go('/dashboard');
+      body: BlocListener<DatabaseInitHandler, DatabaseInitState>(
+        listener: (context, dbState) {
+          if (dbState is DatabaseReadyState) {
+            context.read<SplashCubit>().checkPermissions();
           }
         },
-        builder: (context, state) => Stack(
-          children: [
-            const _Background(),
-            SafeArea(
-              child: Column(
-                children: [
-                  const Spacer(),
-                  const SplashLogoWidget(),
-                  const SizedBox(height: 48),
-                  if (state.phase == SplashPhase.decompressing ||
-                      state.phase == SplashPhase.error)
-                    SplashProgressBar(
-                      progress: state.progress,
-                      error: state.errorMessage,
+        child: BlocConsumer<SplashCubit, SplashState>(
+          listener: (context, state) {
+            if (state.phase == SplashPhase.ready) {
+              context.go('/dashboard');
+            }
+          },
+          builder: (context, splashState) => Stack(
+            children: [
+              const _Background(),
+              SafeArea(
+                child: Column(
+                  children: [
+                    const Spacer(),
+                    const SplashLogoWidget(),
+                    const SizedBox(height: 48),
+                    BlocBuilder<DatabaseInitHandler, DatabaseInitState>(
+                      builder: (context, dbState) {
+                        if (dbState is DatabaseDecompressingState) {
+                          return SplashProgressBar(
+                            progress: dbState.progressPercentage,
+                            error: null,
+                          );
+                        }
+                        if (dbState is DatabaseErrorState) {
+                          return SplashProgressBar(
+                            progress: 0.0,
+                            error: dbState.errorMessage,
+                          );
+                        }
+                        return const SizedBox.shrink();
+                      },
                     ),
-                  const Spacer(),
-                ],
+                    const Spacer(),
+                  ],
+                ),
               ),
-            ),
-            if (state.phase == SplashPhase.permissions)
-              SplashPermissionSheet(
-                locationGranted: state.locationGranted,
-                notificationGranted: state.notifGranted,
-                batteryGranted: state.batteryGranted,
-                onRequestPermissions: () =>
-                    context.read<SplashCubit>().requestPermissions(),
-                onSkip: () => context.read<SplashCubit>().skipPermissions(),
-              ),
-          ],
+              if (splashState.phase == SplashPhase.permissions)
+                SplashPermissionSheet(
+                  locationGranted: splashState.locationGranted,
+                  bgLocationGranted: splashState.bgLocationGranted,
+                  notificationGranted: splashState.notifGranted,
+                  batteryGranted: splashState.batteryGranted,
+                  fullScreenIntentGranted: splashState.fullScreenIntentGranted,
+                  onRequestPermissions: () =>
+                      context.read<SplashCubit>().requestPermissions(),
+                  onSkip: () => context.read<SplashCubit>().skipPermissions(),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -74,7 +82,7 @@ class _Background extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: RadialGradient(
           center: Alignment.center,
           radius: 1.2,

@@ -9,15 +9,19 @@ class SplashPermissionSheet extends StatelessWidget {
   const SplashPermissionSheet({
     super.key,
     required this.locationGranted,
+    required this.bgLocationGranted,
     required this.notificationGranted,
     required this.batteryGranted,
+    required this.fullScreenIntentGranted,
     required this.onRequestPermissions,
     required this.onSkip,
   });
 
   final bool locationGranted;
+  final bool bgLocationGranted;
   final bool notificationGranted;
   final bool batteryGranted;
+  final bool fullScreenIntentGranted;
   final VoidCallback onRequestPermissions;
   final VoidCallback onSkip;
 
@@ -28,9 +32,9 @@ class SplashPermissionSheet extends StatelessWidget {
       left: 0,
       right: 0,
       child: Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: ColorConstants.surfaceModal,
-          borderRadius: BorderRadius.vertical(
+          borderRadius: const BorderRadius.vertical(
             top: Radius.circular(AppConstants.radiusXl),
           ),
         ),
@@ -81,6 +85,13 @@ class SplashPermissionSheet extends StatelessWidget {
             ),
             const SizedBox(height: AppConstants.spaceMd),
             _PermissionRow(
+              icon: Icons.location_searching_rounded,
+              label: StringConstants.splashPermBgLocation,
+              description: StringConstants.splashPermBgLocationDesc,
+              granted: bgLocationGranted,
+            ),
+            const SizedBox(height: AppConstants.spaceMd),
+            _PermissionRow(
               icon: Icons.notifications_rounded,
               label: StringConstants.splashPermNotification,
               description: StringConstants.splashPermNotifDesc,
@@ -92,6 +103,13 @@ class SplashPermissionSheet extends StatelessWidget {
               label: StringConstants.splashPermBattery,
               description: StringConstants.splashPermBatteryDesc,
               granted: batteryGranted,
+            ),
+            const SizedBox(height: AppConstants.spaceMd),
+            _PermissionRow(
+              icon: Icons.phone_android_rounded,
+              label: StringConstants.splashPermFullScreen,
+              description: StringConstants.splashPermFullScreenDesc,
+              granted: fullScreenIntentGranted,
             ),
             const SizedBox(height: AppConstants.spaceXl),
             SnoozerButton(
