@@ -8,7 +8,7 @@ abstract final class AppTheme {
     final base = ThemeData.dark(useMaterial3: true);
     return base.copyWith(
       scaffoldBackgroundColor: ColorConstants.surfaceBase,
-      colorScheme: const ColorScheme.dark(
+      colorScheme: ColorScheme.dark(
         primary:    ColorConstants.primary,
         onPrimary:  ColorConstants.surfaceBase,
         surface:    ColorConstants.surfaceSecondary,
@@ -30,7 +30,7 @@ abstract final class AppTheme {
           fontWeight: FontWeight.w600,
           letterSpacing: 0.15,
         ),
-        iconTheme: const IconThemeData(color: ColorConstants.textPrimary),
+        iconTheme: IconThemeData(color: ColorConstants.textPrimary),
       ),
       cardTheme: CardThemeData(
         color: ColorConstants.surfaceSecondary,
@@ -40,7 +40,7 @@ abstract final class AppTheme {
         ),
         margin: EdgeInsets.zero,
       ),
-      dividerTheme: const DividerThemeData(
+      dividerTheme: DividerThemeData(
         color: ColorConstants.divider,
         thickness: 1,
         space: 0,
@@ -68,10 +68,10 @@ abstract final class AppTheme {
                 ? ColorConstants.primary
                 : ColorConstants.surfaceElevated),
       ),
-      bottomSheetTheme: const BottomSheetThemeData(
+      bottomSheetTheme: BottomSheetThemeData(
         backgroundColor: ColorConstants.surfaceModal,
         modalBackgroundColor: ColorConstants.surfaceModal,
-        shape: RoundedRectangleBorder(
+        shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(
             top: Radius.circular(AppConstants.radiusXl),
           ),
