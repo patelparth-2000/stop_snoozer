@@ -33,7 +33,7 @@ class TransportModeIcon extends StatelessWidget {
         TransitMode.rail       => (Icons.train,             ColorConstants.transportRail),
         TransitMode.dlr        => (Icons.tram,              ColorConstants.transportDlr),
         TransitMode.overground => (Icons.directions_transit, ColorConstants.transportOverground),
-        TransitMode.tram       => (Icons.tram,              ColorConstants.transportDlr),
+        TransitMode.tram       => (Icons.tram,              ColorConstants.transportTram),
         TransitMode.ferry      => (Icons.directions_boat,   ColorConstants.transportRail),
       };
 

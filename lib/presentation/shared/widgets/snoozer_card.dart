@@ -29,9 +29,9 @@ class SnoozerCard extends StatelessWidget {
         decoration: BoxDecoration(
           color: color ?? ColorConstants.surfaceSecondary,
           borderRadius: BorderRadius.circular(AppConstants.radiusLg),
-          border: borderColor != null
-              ? Border.all(color: borderColor!, width: 1)
-              : null,
+          border: Border.all(
+            color: borderColor ?? ColorConstants.surfaceElevated,
+          ),
           boxShadow: glowColor != null
               ? [BoxShadow(color: glowColor!, blurRadius: 20)]
               : null,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../../../core/constants/color_constants.dart';
 import '../../../core/constants/app_constants.dart';
 
@@ -24,21 +25,49 @@ class SnoozerButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final disabled = onTap == null;
+
     final bg = switch (variant) {
-      SnoozerButtonVariant.primary   => ColorConstants.primary,
+      SnoozerButtonVariant.primary   => disabled
+          ? ColorConstants.surfaceElevated
+          : ColorConstants.primary,
       SnoozerButtonVariant.secondary => ColorConstants.surfaceElevated,
       SnoozerButtonVariant.ghost     => Colors.transparent,
-      SnoozerButtonVariant.danger    => ColorConstants.error,
+      SnoozerButtonVariant.danger    => ColorConstants.error.withValues(alpha: 0.15),
     };
+
     final fg = switch (variant) {
-      SnoozerButtonVariant.primary   => ColorConstants.surfaceBase,
+      SnoozerButtonVariant.primary   => disabled
+          ? ColorConstants.textDisabled
+          : ColorConstants.surfaceBase,
       SnoozerButtonVariant.secondary => ColorConstants.textPrimary,
       SnoozerButtonVariant.ghost     => ColorConstants.textSecondary,
-      SnoozerButtonVariant.danger    => ColorConstants.surfaceBase,
+      SnoozerButtonVariant.danger    => ColorConstants.error,
     };
-    final glow = variant == SnoozerButtonVariant.primary
-        ? [BoxShadow(color: ColorConstants.primaryGlow, blurRadius: 16)]
+
+    final border = switch (variant) {
+      SnoozerButtonVariant.primary   => disabled
+          ? Border.all(color: ColorConstants.surfaceElevated)
+          : Border.all(color: ColorConstants.primary.withValues(alpha: 0.4)),
+      SnoozerButtonVariant.secondary => Border.all(color: ColorConstants.surfaceElevated),
+      SnoozerButtonVariant.ghost     => null,
+      SnoozerButtonVariant.danger    => Border.all(
+            color: ColorConstants.error.withValues(alpha: 0.3)),
+    };
+
+    final glow = (variant == SnoozerButtonVariant.primary && !disabled)
+        ? [
+            BoxShadow(
+              color: ColorConstants.primary.withValues(alpha: 0.35),
+              blurRadius: 20,
+              offset: const Offset(0, 4),
+            ),
+          ]
         : <BoxShadow>[];
+
+    final radius = variant == SnoozerButtonVariant.primary
+        ? AppConstants.radiusLg
+        : AppConstants.radiusMd;
 
     return GestureDetector(
       onTap: onTap,
@@ -51,7 +80,8 @@ class SnoozerButton extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: bg,
-          borderRadius: BorderRadius.circular(AppConstants.radiusMd),
+          borderRadius: BorderRadius.circular(radius),
+          border: border,
           boxShadow: glow,
         ),
         child: isLoading
@@ -70,14 +100,17 @@ class SnoozerButton extends StatelessWidget {
                     Icon(icon, color: fg, size: 18),
                     const SizedBox(width: AppConstants.spaceSm),
                   ],
-                  Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: fg,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 14,
-                      letterSpacing: 0.05,
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.sora(
+                        color: fg,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                        letterSpacing: 0.2,
+                      ),
                     ),
                   ),
                 ],
