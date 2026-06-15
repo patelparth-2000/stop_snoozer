@@ -39,7 +39,7 @@ class SplashProgressBar extends StatelessWidget {
               value: progress,
               minHeight: 4,
               backgroundColor: ColorConstants.surfaceElevated,
-              valueColor: const AlwaysStoppedAnimation<Color>(ColorConstants.primary),
+              valueColor: AlwaysStoppedAnimation<Color>(ColorConstants.primary),
             ),
           ),
           const SizedBox(height: AppConstants.spaceSm),

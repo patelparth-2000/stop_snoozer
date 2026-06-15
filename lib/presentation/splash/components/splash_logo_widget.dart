@@ -55,7 +55,7 @@ class _SplashLogoWidgetState extends State<SplashLogoWidget>
                 ),
               ],
             ),
-            child: const Icon(
+            child: Icon(
               Icons.notifications_active_rounded,
               color: ColorConstants.primary,
               size: 48,
