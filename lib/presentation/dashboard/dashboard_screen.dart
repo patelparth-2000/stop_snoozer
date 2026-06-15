@@ -9,6 +9,7 @@ import 'components/saved_location_card.dart';
 import 'components/transport_chips_row.dart';
 import 'components/journey_timeline.dart';
 import '../../core/constants/color_constants.dart';
+import '../../core/theme/theme_scope.dart';
 import '../../core/constants/string_constants.dart';
 import '../../core/constants/app_constants.dart';
 import '../../data/models/stop_point.dart';
@@ -42,6 +43,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ThemeScope.watch(context);
     return MultiBlocListener(
       listeners: [
         BlocListener<DashboardCubit, DashboardState>(
@@ -127,14 +129,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ),
           ),
         ),
-            // Floating Action Button
-            floatingActionButton: FloatingActionButton(
-              onPressed: () => context.go('/search'),
-              backgroundColor: ColorConstants.primary,
-              foregroundColor: ColorConstants.surfaceBase,
-              elevation: 4,
-              child: const Icon(Icons.add_rounded, size: 28),
-            ),
           ),
           if (_showOnboarding)
             OnboardingOverlay(
@@ -249,7 +243,7 @@ class _ProximitySuggestionCard extends StatelessWidget {
                 ],
               ),
             ),
-            const Icon(
+            Icon(
               Icons.arrow_forward_ios_rounded,
               color: ColorConstants.primary,
               size: 14,
@@ -276,7 +270,7 @@ class _BottomBar extends StatelessWidget {
         AppConstants.containerMargin,
         AppConstants.spaceMd + MediaQuery.of(context).padding.bottom,
       ),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: ColorConstants.surfaceBase,
         border: Border(top: BorderSide(color: ColorConstants.divider, width: 1)),
       ),
