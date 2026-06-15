@@ -25,7 +25,7 @@ class TripConfigFooter extends StatelessWidget {
         AppConstants.containerMargin,
         AppConstants.spaceMd + MediaQuery.of(context).padding.bottom,
       ),
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         color: ColorConstants.surfaceBase,
         border: Border(top: BorderSide(color: ColorConstants.divider, width: 1)),
       ),

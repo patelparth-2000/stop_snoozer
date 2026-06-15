@@ -23,10 +23,10 @@ class AlarmStyleToggle extends StatelessWidget {
         Text(
           StringConstants.tripConfigStyle,
           style: GoogleFonts.sora(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: ColorConstants.textSecondary,
-            letterSpacing: 0.1,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: ColorConstants.textDisabled,
+            letterSpacing: 0.3,
           ),
         ),
         const SizedBox(height: AppConstants.spaceSm),
@@ -44,7 +44,7 @@ class AlarmStyleToggle extends StatelessWidget {
             Expanded(
               child: _StyleOption(
                 label: StringConstants.tripConfigDefcon,
-                icon: Icons.warning_amber_rounded,
+                icon: Icons.campaign_rounded,
                 selected: value == AlarmStyle.defconDrill,
                 onTap: () => onChanged(AlarmStyle.defconDrill),
               ),
@@ -77,30 +77,42 @@ class _StyleOption extends StatelessWidget {
         duration: const Duration(milliseconds: AppConstants.durationFast),
         padding: const EdgeInsets.symmetric(
           horizontal: AppConstants.spaceSm,
-          vertical: AppConstants.spaceMd,
+          vertical: 14,
         ),
         decoration: BoxDecoration(
-          color: selected ? ColorConstants.primarySubtle : ColorConstants.surfaceElevated,
+          color: selected
+              ? ColorConstants.primary.withValues(alpha: 0.1)
+              : ColorConstants.surfaceElevated,
           borderRadius: BorderRadius.circular(AppConstants.radiusMd),
           border: selected
-              ? Border.all(color: ColorConstants.primary, width: 1)
-              : Border.all(color: ColorConstants.surfaceElevated, width: 1),
+              ? Border.all(
+                  color: ColorConstants.primary.withValues(alpha: 0.5))
+              : Border.all(color: ColorConstants.surfaceElevated),
         ),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
               icon,
-              color: selected ? ColorConstants.primary : ColorConstants.textSecondary,
-              size: 20,
+              color: selected
+                  ? ColorConstants.primary
+                  : ColorConstants.textDisabled,
+              size: 22,
             ),
-            const SizedBox(height: AppConstants.spaceXs),
+            const SizedBox(height: 6),
             Text(
               label,
               textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
               style: GoogleFonts.inter(
                 fontSize: 11,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                color: selected ? ColorConstants.primary : ColorConstants.textSecondary,
+                fontWeight:
+                    selected ? FontWeight.w600 : FontWeight.w400,
+                color: selected
+                    ? ColorConstants.primary
+                    : ColorConstants.textSecondary,
+                height: 1.3,
               ),
             ),
           ],
