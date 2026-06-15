@@ -25,20 +25,23 @@ class WakeRadiusSlider extends StatelessWidget {
             Text(
               StringConstants.tripConfigRadius,
               style: GoogleFonts.sora(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: ColorConstants.textSecondary,
-                letterSpacing: 0.1,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: ColorConstants.textDisabled,
+                letterSpacing: 0.3,
               ),
             ),
             Container(
               padding: const EdgeInsets.symmetric(
                 horizontal: AppConstants.spaceSm,
-                vertical: AppConstants.spaceXs,
+                vertical: 3,
               ),
               decoration: BoxDecoration(
                 color: ColorConstants.primarySubtle,
-                borderRadius: BorderRadius.circular(AppConstants.radiusFull),
+                borderRadius:
+                    BorderRadius.circular(AppConstants.radiusFull),
+                border: Border.all(
+                    color: ColorConstants.primary.withValues(alpha: 0.3)),
               ),
               child: Text(
                 '${value.round()} ${StringConstants.tripConfigMetres}',
@@ -51,8 +54,20 @@ class WakeRadiusSlider extends StatelessWidget {
             ),
           ],
         ),
+        const SizedBox(height: AppConstants.spaceXs),
         SliderTheme(
-          data: SliderTheme.of(context),
+          data: SliderThemeData(
+            activeTrackColor: ColorConstants.primary,
+            inactiveTrackColor: ColorConstants.surfaceElevated,
+            thumbColor: ColorConstants.primary,
+            overlayColor: ColorConstants.primarySubtle,
+            trackHeight: 3,
+            thumbShape:
+                const RoundSliderThumbShape(enabledThumbRadius: 7),
+            overlayShape:
+                const RoundSliderOverlayShape(overlayRadius: 14),
+            showValueIndicator: ShowValueIndicator.never,
+          ),
           child: Slider(
             value: value,
             min: AppConstants.minWakeRadiusMetres,
@@ -61,18 +76,23 @@ class WakeRadiusSlider extends StatelessWidget {
             onChanged: onChanged,
           ),
         ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              '${AppConstants.minWakeRadiusMetres.round()} m',
-              style: GoogleFonts.inter(fontSize: 10, color: ColorConstants.textDisabled),
-            ),
-            Text(
-              '${AppConstants.maxWakeRadiusMetres.round()} m',
-              style: GoogleFonts.inter(fontSize: 10, color: ColorConstants.textDisabled),
-            ),
-          ],
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${AppConstants.minWakeRadiusMetres.round()} m',
+                style: GoogleFonts.inter(
+                    fontSize: 10, color: ColorConstants.textDisabled),
+              ),
+              Text(
+                '${AppConstants.maxWakeRadiusMetres.round()} m',
+                style: GoogleFonts.inter(
+                    fontSize: 10, color: ColorConstants.textDisabled),
+              ),
+            ],
+          ),
         ),
       ],
     );
