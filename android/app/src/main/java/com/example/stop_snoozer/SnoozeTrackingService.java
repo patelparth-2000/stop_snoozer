@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.graphics.Color;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -12,6 +13,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.location.Location;
 import android.location.LocationManager;
+import android.media.AudioAttributes;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
 import android.net.Uri;
@@ -35,7 +37,11 @@ import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
 import com.google.android.gms.location.Priority;
 
+import java.util.ArrayList;
 import java.util.List;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Foreground service — GPS geofencing (above ground) + Wi-Fi SSID scanning (underground).
@@ -44,9 +50,12 @@ import java.util.List;
 public class SnoozeTrackingService extends Service {
 
     // ── Action constants ───────────────────────────────────────────────────
-    static final String ACTION_START_GEOFENCE = "com.stopsnoozer.app.START_GEOFENCE";
-    static final String ACTION_START_WIFI     = "com.stopsnoozer.app.START_WIFI";
-    static final String ACTION_STOP           = "com.stopsnoozer.app.STOP_TRACKING";
+    static final String ACTION_START_GEOFENCE  = "com.stopsnoozer.app.START_GEOFENCE";
+    static final String ACTION_START_WIFI      = "com.stopsnoozer.app.START_WIFI";
+    static final String ACTION_START_HYBRID    = "com.stopsnoozer.app.START_HYBRID";
+    static final String ACTION_UPDATE_TARGETS  = "com.stopsnoozer.app.UPDATE_TARGETS";
+    static final String ACTION_ADD_TARGET      = "com.stopsnoozer.app.ADD_TARGET";
+    static final String ACTION_STOP            = "com.stopsnoozer.app.STOP_TRACKING";
     static final String ACTION_ALARM_TRIGGER  = "com.stopsnoozer.app.ALARM_TRIGGER";
     static final String ACTION_STOP_ALARM     = "com.stopsnoozer.app.STOP_ALARM";
     static final String ACTION_SNOOZE         = "com.stopsnoozer.app.SNOOZE_ALARM";
@@ -59,6 +68,7 @@ public class SnoozeTrackingService extends Service {
     static final String PREF_RINGTONE_NAME  = "alarm_ringtone_name";
     // Persisted tracking state — restored when Android restarts the service
     private static final String PREF_TRACKING_ACTION    = "tracking_action";
+    private static final String PREF_TARGETS_JSON       = "tracking_targets_json";
     private static final String PREF_TRACKING_STOP_ID   = "tracking_stop_id";
     private static final String PREF_TRACKING_STOP_NAME = "tracking_stop_name";
     private static final String PREF_TRACKING_LAT       = "tracking_lat";
@@ -73,26 +83,39 @@ public class SnoozeTrackingService extends Service {
     private static final int    ALARM_NOTIF_ID       = 1002;
     private static final int    LOCATION_OFF_NOTIF_ID = 1003;
 
-    private static final int WIFI_SCAN_INTERVAL_MS          = 8_000;
+    private static final int WIFI_SCAN_INTERVAL_MS           = 8_000;
     private static final int WIFI_SCAN_THROTTLED_INTERVAL_MS = 32_000;
+    // Seconds the user has to dismiss the alarm screen before the ringtone starts
+    static final int ALARM_COUNTDOWN_SECS = 3;
 
     // ── State ──────────────────────────────────────────────────────────────
     private FusedLocationProviderClient fusedClient;
     private LocationCallback            locationCallback;
+    private LocationCallback            networkLocationCallback; // WiFi/cell fallback for underground
     private WifiManager                 wifiManager;
     private BroadcastReceiver           wifiScanReceiver;
     private Handler                     wifiScanHandler;
     private Runnable                    wifiScanRunnable;
     private Ringtone                    alarmRingtone;
+    // Delayed ringtone: cancelled if user dismisses within ALARM_COUNTDOWN_SECS
+    private Handler                     soundHandler;
+    private Runnable                    pendingSoundRunnable;
 
     private volatile boolean alarmFired = false;
+    private String currentAlarmStyle = "defconDrill";
 
+    static final String PREF_ALARM_STYLE_ACTIVE = "alarm_style_active";
+
+    // Single-target fields — used by GEOFENCE/WIFI/HYBRID scheduled alarms
     private String targetStopId;
     private String targetStopName;
     private double targetLat;
     private double targetLon;
     private float  targetRadius;
     private String targetSsid;
+
+    // Multi-target list — used by UPDATE_TARGETS (manual saved locations)
+    private final ArrayList<TargetStop> targets = new ArrayList<>();
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -103,13 +126,23 @@ public class SnoozeTrackingService extends Service {
         fusedClient     = LocationServices.getFusedLocationProviderClient(this);
         wifiManager     = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         wifiScanHandler = new Handler(Looper.getMainLooper());
+        soundHandler    = new Handler(Looper.getMainLooper());
+    }
+
+    /** True while location callbacks or Wi-Fi scanning are registered. */
+    private boolean isActivelyTracking() {
+        return locationCallback != null || networkLocationCallback != null
+                || wifiScanRunnable != null;
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) {
-            // Android restarted the service after it was killed — restore state
-            resumeFromPrefs();
+        // intent == null  → Android START_STICKY auto-restart after OOM kill.
+        // action == null  → BootReceiver or onTaskRemoved AlarmManager ping
+        //                   (non-null intent but no action set).
+        // Both cases must restore tracking from SharedPreferences.
+        if (intent == null || intent.getAction() == null) {
+            if (!isActivelyTracking()) resumeFromPrefs();
             return START_STICKY;
         }
 
@@ -117,16 +150,15 @@ public class SnoozeTrackingService extends Service {
                 buildTrackingNotification("StopSnoozer is watching your route…"));
 
         final String action = intent.getAction();
-        if (action == null) return START_STICKY;
-
         switch (action) {
             case ACTION_START_GEOFENCE:
-                alarmFired     = false;
-                targetStopId   = intent.getStringExtra("stopId");
-                targetStopName = intent.getStringExtra("stopName");
-                targetLat      = intent.getDoubleExtra("lat", 0);
-                targetLon      = intent.getDoubleExtra("lon", 0);
-                targetRadius   = intent.getFloatExtra("radiusMetres", 500f);
+                alarmFired        = false;
+                targetStopId      = intent.getStringExtra("stopId");
+                targetStopName    = intent.getStringExtra("stopName");
+                targetLat         = intent.getDoubleExtra("lat", 0);
+                targetLon         = intent.getDoubleExtra("lon", 0);
+                targetRadius      = intent.getFloatExtra("radiusMetres", 500f);
+                { String s = intent.getStringExtra("alarmStyle"); currentAlarmStyle = s != null && !s.isEmpty() ? s : "defconDrill"; }
                 if (!isLocationEnabled()) {
                     showLocationOffNotification();
                     clearTrackingState();
@@ -153,6 +185,87 @@ public class SnoozeTrackingService extends Service {
                 saveTrackingState(ACTION_START_WIFI);
                 startSubterraneanTracking();
                 break;
+
+            case ACTION_START_HYBRID:
+                alarmFired        = false;
+                targets.clear();
+                targetStopId      = intent.getStringExtra("stopId");
+                targetStopName    = intent.getStringExtra("stopName");
+                targetLat         = intent.getDoubleExtra("lat", 0);
+                targetLon         = intent.getDoubleExtra("lon", 0);
+                targetRadius      = intent.getFloatExtra("radiusMetres", 300f);
+                targetSsid        = intent.getStringExtra("targetSsid");
+                { String s = intent.getStringExtra("alarmStyle"); currentAlarmStyle = s != null && !s.isEmpty() ? s : "defconDrill"; }
+                saveTrackingState(ACTION_START_HYBRID);
+                startHybridTracking();
+                break;
+
+            case ACTION_UPDATE_TARGETS: {
+                String json = intent.getStringExtra("targetsJson");
+                targets.clear();
+                alarmFired = false;
+                if (json != null && !json.isEmpty()) {
+                    try {
+                        JSONArray arr = new JSONArray(json);
+                        for (int i = 0; i < arr.length(); i++) {
+                            targets.add(TargetStop.fromJson(arr.getJSONObject(i)));
+                        }
+                    } catch (Exception ignored) {}
+                }
+                if (targets.isEmpty()) {
+                    dismissAlarm();
+                    break;
+                }
+                saveTargetsJson();
+                saveTrackingState(ACTION_UPDATE_TARGETS);
+                startMultiTargetTracking();
+                break;
+            }
+
+            case ACTION_ADD_TARGET: {
+                // Restore existing multi-targets from prefs (handles post-kill case)
+                if (targets.isEmpty()) {
+                    SharedPreferences ap = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+                    String tj = ap.getString(PREF_TARGETS_JSON, null);
+                    if (tj != null) {
+                        try {
+                            JSONArray arr = new JSONArray(tj);
+                            for (int i = 0; i < arr.length(); i++)
+                                targets.add(TargetStop.fromJson(arr.getJSONObject(i)));
+                        } catch (Exception ignored) {}
+                    }
+                    // Also absorb an active single-target (GEOFENCE/HYBRID) into the list
+                    if (targets.isEmpty()) {
+                        String cur = ap.getString(PREF_TRACKING_ACTION, null);
+                        if (ACTION_START_GEOFENCE.equals(cur) || ACTION_START_HYBRID.equals(cur)) {
+                            String eId   = ap.getString(PREF_TRACKING_STOP_ID,   null);
+                            String eName = ap.getString(PREF_TRACKING_STOP_NAME, null);
+                            double eLat  = Double.longBitsToDouble(ap.getLong(PREF_TRACKING_LAT, 0));
+                            double eLon  = Double.longBitsToDouble(ap.getLong(PREF_TRACKING_LON, 0));
+                            float  eRad  = ap.getFloat(PREF_TRACKING_RADIUS, 300f);
+                            String eSsid = ap.getString(PREF_TRACKING_SSID, null);
+                            if (eId != null && !eId.isEmpty())
+                                targets.add(new TargetStop(eId, eName, eLat, eLon, eRad, eSsid));
+                        }
+                    }
+                }
+                // Add/update new target (deduplicate by stopId)
+                String newId   = intent.getStringExtra("stopId");
+                String newName = intent.getStringExtra("stopName");
+                double newLat  = intent.getDoubleExtra("lat", 0);
+                double newLon  = intent.getDoubleExtra("lon", 0);
+                float  newRad  = intent.getFloatExtra("radiusMetres", 300f);
+                String newSsid = intent.getStringExtra("ssid");
+                for (int i = targets.size() - 1; i >= 0; i--) {
+                    if (targets.get(i).stopId.equals(newId)) targets.remove(i);
+                }
+                targets.add(new TargetStop(newId, newName, newLat, newLon, newRad, newSsid));
+                alarmFired = false;
+                saveTargetsJson();
+                saveTrackingState(ACTION_UPDATE_TARGETS);
+                startMultiTargetTracking();
+                break;
+            }
 
             case ACTION_STOP:
                 dismissAlarm();
@@ -184,33 +297,100 @@ public class SnoozeTrackingService extends Service {
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
-    // ── Above-ground GPS Geofencing ───────────────────────────────────────
+    // ── Above-ground GPS Geofencing + Network (underground) fallback ─────────
+
+    /** Shared distance check — called by both GPS and network location callbacks. */
+    private void checkLocationAndTrigger(Location loc) {
+        if (alarmFired) return;
+        float[] dist = new float[1];
+        if (!targets.isEmpty()) {
+            for (TargetStop t : targets) {
+                if (t.lat == 0.0 && t.lon == 0.0) continue;
+                Location.distanceBetween(loc.getLatitude(), loc.getLongitude(), t.lat, t.lon, dist);
+                if (dist[0] <= t.radius) {
+                    triggerAlarm(t.stopId, t.stopName, dist[0]);
+                    return;
+                }
+            }
+        } else {
+            Location.distanceBetween(loc.getLatitude(), loc.getLongitude(),
+                    targetLat, targetLon, dist);
+            if (dist[0] <= targetRadius)
+                triggerAlarm(targetStopId, targetStopName, dist[0]);
+        }
+    }
 
     @SuppressWarnings("MissingPermission")
     private void startAboveGroundTracking() {
-        LocationRequest request = new LocationRequest.Builder(
+        // Primary: GPS — precise above ground, 5s interval
+        LocationRequest gpsRequest = new LocationRequest.Builder(
                 Priority.PRIORITY_HIGH_ACCURACY, 5_000L)
                 .setMinUpdateIntervalMillis(3_000L)
+                .build();
+
+        // Fallback: WiFi/cell triangulation — fires when GPS loses signal underground.
+        // Does NOT require a specific SSID — uses Google's WiFi positioning database.
+        LocationRequest networkRequest = new LocationRequest.Builder(
+                Priority.PRIORITY_BALANCED_POWER_ACCURACY, 10_000L)
+                .setMinUpdateIntervalMillis(8_000L)
                 .build();
 
         locationCallback = new LocationCallback() {
             @Override
             public void onLocationResult(@NonNull LocationResult result) {
-                if (alarmFired) return;
                 Location loc = result.getLastLocation();
-                if (loc == null) return;
-
-                float[] dist = new float[1];
-                Location.distanceBetween(
-                        loc.getLatitude(), loc.getLongitude(),
-                        targetLat, targetLon, dist);
-
-                if (dist[0] <= targetRadius) triggerAlarm(dist[0]);
+                if (loc != null) checkLocationAndTrigger(loc);
             }
         };
 
-        fusedClient.requestLocationUpdates(request, locationCallback, Looper.getMainLooper());
-        updateTrackingNotification("Tracking: " + targetStopName);
+        networkLocationCallback = new LocationCallback() {
+            @Override
+            public void onLocationResult(@NonNull LocationResult result) {
+                Location loc = result.getLastLocation();
+                if (loc != null) checkLocationAndTrigger(loc);
+            }
+        };
+
+        try {
+            fusedClient.requestLocationUpdates(gpsRequest,     locationCallback,        Looper.getMainLooper());
+            fusedClient.requestLocationUpdates(networkRequest, networkLocationCallback, Looper.getMainLooper());
+            updateTrackingNotification("Tracking: " + targetStopName);
+        } catch (SecurityException e) {
+            locationCallback        = null;
+            networkLocationCallback = null;
+            showPermissionMissingNotification();
+            clearTrackingState();
+            stopForeground(true);
+            stopSelf();
+        }
+    }
+
+    private void showPermissionMissingNotification() {
+        Intent settingsIntent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        settingsIntent.setData(Uri.fromParts("package", getPackageName(), null));
+        settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        PendingIntent settingsPi = PendingIntent.getActivity(
+                this, 5, settingsIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Notification n = new NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setColor(APP_COLOR)
+                .setContentTitle("Background Location Needed")
+                .setContentText("Set location to 'Allow all the time' for alarms to work")
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(
+                        "Your scheduled alarm fired but background location is not granted. "
+                        + "Open App Settings → Location → Allow all the time, "
+                        + "then re-save your alarm."))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ERROR)
+                .setAutoCancel(true)
+                .setContentIntent(settingsPi)
+                .addAction(android.R.drawable.ic_menu_mylocation, "Open App Settings", settingsPi)
+                .build();
+
+        NotificationManager mgr = getSystemService(NotificationManager.class);
+        if (mgr != null) mgr.notify(LOCATION_OFF_NOTIF_ID + 2, n);
     }
 
     private void stopAboveGroundTracking() {
@@ -218,6 +398,28 @@ public class SnoozeTrackingService extends Service {
             fusedClient.removeLocationUpdates(locationCallback);
             locationCallback = null;
         }
+        if (fusedClient != null && networkLocationCallback != null) {
+            fusedClient.removeLocationUpdates(networkLocationCallback);
+            networkLocationCallback = null;
+        }
+    }
+
+    // ── Hybrid GPS + Wi-Fi ────────────────────────────────────────────────
+
+    private void startHybridTracking() {
+        boolean gpsOk  = isLocationEnabled();
+        boolean wifiOk = isWifiEnabled();
+        if (!gpsOk && !wifiOk) {
+            // Neither sensor available — show location-off notification as a best-effort
+            showLocationOffNotification();
+            clearTrackingState();
+            stopForeground(true);
+            stopSelf();
+            return;
+        }
+        if (gpsOk)  startAboveGroundTracking();
+        if (wifiOk) startSubterraneanTracking();
+        updateTrackingNotification("GPS + WiFi: " + targetStopName);
     }
 
     // ── Subterranean Wi-Fi SSID Scanning ──────────────────────────────────
@@ -252,12 +454,28 @@ public class SnoozeTrackingService extends Service {
 
     @SuppressWarnings("deprecation")
     private void evaluateWifiResults() {
-        if (wifiManager == null || targetSsid == null) return;
+        if (wifiManager == null) return;
         List<ScanResult> results = wifiManager.getScanResults();
-        for (ScanResult r : results) {
-            if (targetSsid.equalsIgnoreCase(r.SSID) || targetSsid.equalsIgnoreCase(r.BSSID)) {
-                triggerAlarm(0f);
-                return;
+
+        if (!targets.isEmpty()) {
+            // Multi-target mode: match any target's SSID
+            for (TargetStop t : targets) {
+                if (t.ssid == null) continue;
+                for (ScanResult r : results) {
+                    if (t.ssid.equalsIgnoreCase(r.SSID) || t.ssid.equalsIgnoreCase(r.BSSID)) {
+                        triggerAlarm(t.stopId, t.stopName, 0f);
+                        return;
+                    }
+                }
+            }
+        } else {
+            // Single-target mode
+            if (targetSsid == null) return;
+            for (ScanResult r : results) {
+                if (targetSsid.equalsIgnoreCase(r.SSID) || targetSsid.equalsIgnoreCase(r.BSSID)) {
+                    triggerAlarm(targetStopId, targetStopName, 0f);
+                    return;
+                }
             }
         }
     }
@@ -275,133 +493,177 @@ public class SnoozeTrackingService extends Service {
 
     // ── Alarm Dispatch ─────────────────────────────────────────────────────
 
-    private void triggerAlarm(float distanceMetres) {
-        if (alarmFired) return;
-        alarmFired = true;
+    private void startMultiTargetTracking() {
         stopSensors();
+        boolean needGps = false, needWifi = false;
+        StringBuilder names = new StringBuilder();
+        for (TargetStop t : targets) {
+            if (t.lat != 0.0 || t.lon != 0.0) needGps  = true;
+            if (t.ssid != null)                needWifi = true;
+            if (names.length() > 0) names.append(", ");
+            names.append(t.stopName);
+        }
+        if (needGps  && isLocationEnabled()) startAboveGroundTracking();
+        if (needWifi && isWifiEnabled())     startSubterraneanTracking();
+        updateTrackingNotification("Tracking: " + names);
+    }
 
-        SharedPreferences prefs   = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        String            type    = prefs.getString(PREF_ALARM_TYPE, "both");
-        boolean           screen  = !type.equals("notification");
-        boolean           notif   = !type.equals("screen");
+    private void saveTargetsJson() {
+        JSONArray arr = new JSONArray();
+        for (TargetStop t : targets) arr.put(t.toJson());
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(PREF_TARGETS_JSON, arr.toString())
+                .apply();
+    }
 
-        // Persist alarm data so Flutter can recover it on cold start
+    private void triggerAlarm(String stopId, String stopName, float distanceMetres) {
+        if (alarmFired) return;
+        alarmFired     = true;
+        targetStopId   = stopId;
+        targetStopName = stopName;
+
+        // Multi-target: remove fired stop; keep sensors running for remaining targets
+        boolean hasRemaining = false;
+        if (!targets.isEmpty()) {
+            for (int i = targets.size() - 1; i >= 0; i--) {
+                if (targets.get(i).stopId.equals(stopId)) { targets.remove(i); break; }
+            }
+            hasRemaining = !targets.isEmpty();
+            if (hasRemaining) saveTargetsJson();
+        }
+        // Stop sensors only when this was the last target
+        if (!hasRemaining) stopSensors();
+
+        final long firedAt = System.currentTimeMillis();
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+
         prefs.edit()
                 .putString("pending_alarm_stop_id",   targetStopId   != null ? targetStopId   : "")
                 .putString("pending_alarm_stop_name", targetStopName != null ? targetStopName : "")
                 .putFloat("pending_alarm_distance",   distanceMetres)
+                .putLong("pending_alarm_fired_at",    firedAt)
                 .apply();
 
-        playAlarmSound(prefs);
+        showAlarmNotification(distanceMetres);
 
-        if (screen) {
-            // Full-screen intent: wakes the screen and shows alarm UI over any app/lock screen
-            showAlarmScreenOverlay(distanceMetres);
-            // Also broadcast for a Flutter instance already running in memory
-            Intent bc = new Intent(ACTION_ALARM_TRIGGER);
-            bc.putExtra("stopId",         targetStopId);
-            bc.putExtra("stopName",       targetStopName);
-            bc.putExtra("distanceMetres", distanceMetres);
-            sendBroadcast(bc);
-        }
+        Intent bc = new Intent(ACTION_ALARM_TRIGGER);
+        bc.putExtra("stopId",         targetStopId);
+        bc.putExtra("stopName",       targetStopName);
+        bc.putExtra("distanceMetres", distanceMetres);
+        bc.putExtra("firedAt",        firedAt);
+        bc.putExtra("countdownSecs",  ALARM_COUNTDOWN_SECS);
+        sendBroadcast(bc);
 
-        if (notif) {
-            // Banner notification (with full-screen intent when "both" mode)
-            showAlarmNotification(distanceMetres, screen);
+        pendingSoundRunnable = () -> playAlarmSound(getSharedPreferences(PREFS_NAME, MODE_PRIVATE));
+        soundHandler.postDelayed(pendingSoundRunnable, 500L);
+
+        // Allow remaining targets to fire after a 5-second cooldown
+        if (hasRemaining) {
+            new Handler(Looper.getMainLooper()).postDelayed(() -> alarmFired = false, 5_000L);
         }
     }
 
+    private String getTargetNames() {
+        StringBuilder sb = new StringBuilder();
+        for (TargetStop t : targets) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(t.stopName);
+        }
+        return sb.toString();
+    }
+
     private void playAlarmSound(SharedPreferences prefs) {
-        String uriStr = prefs.getString(PREF_RINGTONE_URI, null);
-        Uri uri = uriStr != null
-                ? Uri.parse(uriStr)
-                : RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+        boolean isSubtle = "subtlePulse".equals(
+                prefs.getString(PREF_ALARM_STYLE_ACTIVE, "defconDrill"));
+
+        Uri uri;
+        if (isSubtle) {
+            uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+        } else {
+            String uriStr = prefs.getString(PREF_RINGTONE_URI, null);
+            uri = uriStr != null
+                    ? Uri.parse(uriStr)
+                    : RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
+        }
         if (uri == null) uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
         if (uri == null) return;
 
         alarmRingtone = RingtoneManager.getRingtone(this, uri);
         if (alarmRingtone == null) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            alarmRingtone.setLooping(true);
-        }
+
+        alarmRingtone.setAudioAttributes(new AudioAttributes.Builder()
+                .setUsage(isSubtle ? AudioAttributes.USAGE_NOTIFICATION : AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build());
+        alarmRingtone.setLooping(!isSubtle); // subtle = one-shot; defconDrill = looped
         alarmRingtone.play();
     }
 
-    private void showAlarmNotification(float distanceMetres, boolean fullStyle) {
-        // "Stop Alarm" taps the service directly via PendingIntent
+    /**
+     * Posts the alarm notification.
+     * On Android 14+ checks USE_FULL_SCREEN_INTENT; falls back to heads-up if not granted.
+     * Always shows on the lock screen (VISIBILITY_PUBLIC) and wakes the device.
+     */
+    private void showAlarmNotification(float distanceMetres) {
         Intent stopIntent = new Intent(this, SnoozeTrackingService.class);
         stopIntent.setAction(ACTION_STOP_ALARM);
         PendingIntent stopPi = PendingIntent.getService(this, 1, stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        // Full-screen intent launches the Flutter alarm screen
-        Intent fsIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        PendingIntent fsPi = null;
-        if (fsIntent != null) {
-            fsIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            fsIntent.putExtra("route",          "/alarm");
-            fsIntent.putExtra("stopId",         targetStopId);
-            fsIntent.putExtra("stopName",       targetStopName);
-            fsIntent.putExtra("distanceMetres", distanceMetres);
-            fsPi = PendingIntent.getActivity(this, 0, fsIntent,
+        Intent snoozeIntent = new Intent(this, SnoozeTrackingService.class);
+        snoozeIntent.setAction(ACTION_SNOOZE);
+        snoozeIntent.putExtra(EXTRA_SNOOZE_MINUTES, 2);
+        PendingIntent snoozePi = PendingIntent.getService(this, 3, snoozeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        PendingIntent launchPi = null;
+        if (launchIntent != null) {
+            launchIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            launchIntent.putExtra("alarmFromService", true);
+            launchIntent.putExtra("stopId",           targetStopId);
+            launchIntent.putExtra("stopName",         targetStopName);
+            launchIntent.putExtra("distanceMetres",   distanceMetres);
+            launchPi = PendingIntent.getActivity(this, 2, launchIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         }
 
+        String stop         = targetStopName != null ? targetStopName : "your stop";
+        boolean isAtPlatform = (distanceMetres == 0f);
+        String title   = isAtPlatform
+                ? "You've arrived at " + stop + "!"
+                : "Approaching " + stop + "!";
+        String summary = isAtPlatform
+                ? "You're at the platform — get off now"
+                : "You're " + Math.round(distanceMetres) + "m away — get off soon";
+
         NotificationCompat.Builder b = new NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("StopSnoozer – Wake Up!")
-                .setContentText("Approaching: " + targetStopName)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setColor(APP_COLOR)
+                .setContentTitle(title)
+                .setContentText(summary)
+                .setStyle(new NotificationCompat.BigTextStyle()
+                        .setBigContentTitle(title)
+                        .bigText(summary + ". Tap to open StopSnoozer."))
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
                 .setAutoCancel(false)
+                .addAction(android.R.drawable.ic_menu_recent_history, "Snooze 2 min", snoozePi)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop Alarm", stopPi);
 
-        if (fsPi != null) {
-            b.setContentIntent(fsPi);
-            if (fullStyle) b.setFullScreenIntent(fsPi, true);
+        if (launchPi != null) {
+            b.setContentIntent(launchPi);
         }
 
-        // Replace the tracking notification with the alarm notification
         NotificationManager mgr = getSystemService(NotificationManager.class);
-        if (mgr != null) mgr.cancel(TRACKING_NOTIF_ID);
-        startForeground(ALARM_NOTIF_ID, b.build());
-    }
-
-    /**
-     * Shows a MAX-priority notification with setFullScreenIntent so Android wakes the screen
-     * and displays the alarm UI on top of the lock screen and any foreground app.
-     */
-    private void showAlarmScreenOverlay(float distanceMetres) {
-        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        if (launchIntent == null) return;
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        launchIntent.putExtra("alarmFromService", true);
-
-        PendingIntent fsPi = PendingIntent.getActivity(this, 2, launchIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        Intent stopIntent = new Intent(this, SnoozeTrackingService.class);
-        stopIntent.setAction(ACTION_STOP_ALARM);
-        PendingIntent stopPi = PendingIntent.getService(this, 1, stopIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        Notification n = new NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("StopSnoozer – Wake Up!")
-                .setContentText("Approaching: " + targetStopName)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setOngoing(true)
-                .setAutoCancel(false)
-                .setContentIntent(fsPi)
-                .setFullScreenIntent(fsPi, true)
-                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop Alarm", stopPi)
-                .build();
-
-        NotificationManager mgr = getSystemService(NotificationManager.class);
-        if (mgr != null) mgr.cancel(TRACKING_NOTIF_ID);
-        startForeground(ALARM_NOTIF_ID, n);
+        Notification alarm = b.build();
+        if (mgr != null) {
+            mgr.cancel(TRACKING_NOTIF_ID);
+            mgr.notify(ALARM_NOTIF_ID, alarm);
+        }
+        startForeground(ALARM_NOTIF_ID, alarm);
     }
 
     /**
@@ -410,6 +672,11 @@ public class SnoozeTrackingService extends Service {
      * see how long is left.
      */
     private void snoozeAlarm(int snoozeMinutes) {
+        // Cancel any pending countdown ringtone
+        if (pendingSoundRunnable != null) {
+            soundHandler.removeCallbacks(pendingSoundRunnable);
+            pendingSoundRunnable = null;
+        }
         // Stop ringtone immediately
         if (alarmRingtone != null) {
             alarmRingtone.stop();
@@ -421,32 +688,40 @@ public class SnoozeTrackingService extends Service {
         if (mgr != null) mgr.cancel(ALARM_NOTIF_ID);
 
         String stopLabel = targetStopName != null ? targetStopName : "your stop";
-        Notification snoozeNotif = new NotificationCompat.Builder(this, TRACKING_CHANNEL_ID)
+        PendingIntent snoozeLaunchPi = buildAppLaunchPi(11);
+        NotificationCompat.Builder snoozeBuilder = new NotificationCompat.Builder(this, TRACKING_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_recent_history)
-                .setContentTitle("StopSnoozer – Snoozed")
-                .setContentText("Re-checking " + stopLabel + " in " + snoozeMinutes + " min")
+                .setColor(APP_COLOR)
+                .setContentTitle("Alarm Snoozed — " + stopLabel)
+                .setContentText("Re-checking in " + snoozeMinutes + " min. Tap to open app.")
                 .setPriority(NotificationCompat.PRIORITY_LOW)
-                .setOngoing(true)
-                .build();
-        startForeground(TRACKING_NOTIF_ID, snoozeNotif);
+                .setOngoing(true);
+        if (snoozeLaunchPi != null) snoozeBuilder.setContentIntent(snoozeLaunchPi);
+        startForeground(TRACKING_NOTIF_ID, snoozeBuilder.build());
 
         // Re-arm tracking after the snooze delay
         alarmFired = false;
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            if (ACTION_START_GEOFENCE.equals(
-                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-                            .getString(PREF_TRACKING_ACTION, null))) {
+            String action = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                    .getString(PREF_TRACKING_ACTION, null);
+            if (ACTION_START_GEOFENCE.equals(action)) {
                 startAboveGroundTracking();
+            } else if (ACTION_START_HYBRID.equals(action)) {
+                startHybridTracking();
+            } else if (ACTION_UPDATE_TARGETS.equals(action)) {
+                startMultiTargetTracking();
             } else {
                 startSubterraneanTracking();
             }
         }, snoozeMinutes * 60_000L);
     }
 
-    /** Stops sound, cancels notification, and kills the service. */
+    /** Stops sound, cancels notification. In multi-target mode continues tracking remaining stops. */
     private void dismissAlarm() {
-        clearTrackingState();
-        stopSensors();
+        if (pendingSoundRunnable != null) {
+            soundHandler.removeCallbacks(pendingSoundRunnable);
+            pendingSoundRunnable = null;
+        }
         if (alarmRingtone != null) {
             alarmRingtone.stop();
             alarmRingtone = null;
@@ -456,6 +731,17 @@ public class SnoozeTrackingService extends Service {
             mgr.cancel(TRACKING_NOTIF_ID);
             mgr.cancel(ALARM_NOTIF_ID);
         }
+
+        // Multi-target: fired stop was already removed in triggerAlarm;
+        // sensors are still running for remaining targets — just reset alarm state.
+        if (!targets.isEmpty()) {
+            alarmFired = false;
+            updateTrackingNotification("Tracking: " + getTargetNames());
+            return;
+        }
+
+        stopSensors();
+        clearTrackingState();
         stopForeground(true);
         stopSelf();
     }
@@ -465,19 +751,23 @@ public class SnoozeTrackingService extends Service {
     private void saveTrackingState(String action) {
         SharedPreferences.Editor ed = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
         ed.putString(PREF_TRACKING_ACTION,    action);
-        ed.putString(PREF_TRACKING_STOP_ID,   targetStopId != null ? targetStopId : "");
+        ed.putString(PREF_TRACKING_STOP_ID,   targetStopId   != null ? targetStopId   : "");
         ed.putString(PREF_TRACKING_STOP_NAME, targetStopName != null ? targetStopName : "");
-        if (ACTION_START_GEOFENCE.equals(action)) {
-            ed.putLong(PREF_TRACKING_LAT,    Double.doubleToRawLongBits(targetLat));
-            ed.putLong(PREF_TRACKING_LON,    Double.doubleToRawLongBits(targetLon));
+        if (ACTION_START_GEOFENCE.equals(action) || ACTION_START_HYBRID.equals(action)) {
+            ed.putLong(PREF_TRACKING_LAT,     Double.doubleToRawLongBits(targetLat));
+            ed.putLong(PREF_TRACKING_LON,     Double.doubleToRawLongBits(targetLon));
             ed.putFloat(PREF_TRACKING_RADIUS, targetRadius);
-        } else if (ACTION_START_WIFI.equals(action)) {
+        }
+        if (ACTION_START_WIFI.equals(action) || ACTION_START_HYBRID.equals(action)) {
             ed.putString(PREF_TRACKING_SSID, targetSsid != null ? targetSsid : "");
         }
+        ed.putString(PREF_ALARM_STYLE_ACTIVE, currentAlarmStyle != null ? currentAlarmStyle : "defconDrill");
+        // For UPDATE_TARGETS the targets JSON is saved separately via saveTargetsJson()
         ed.apply();
     }
 
     private void clearTrackingState() {
+        targets.clear();
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .remove(PREF_TRACKING_ACTION)
                 .remove(PREF_TRACKING_STOP_ID)
@@ -486,9 +776,11 @@ public class SnoozeTrackingService extends Service {
                 .remove(PREF_TRACKING_LON)
                 .remove(PREF_TRACKING_RADIUS)
                 .remove(PREF_TRACKING_SSID)
+                .remove(PREF_TARGETS_JSON)
                 .remove("pending_alarm_stop_id")
                 .remove("pending_alarm_stop_name")
                 .remove("pending_alarm_distance")
+                .remove("pending_alarm_fired_at")
                 .apply();
     }
 
@@ -499,6 +791,8 @@ public class SnoozeTrackingService extends Service {
 
         startForeground(TRACKING_NOTIF_ID,
                 buildTrackingNotification("StopSnoozer is watching your route…"));
+
+        currentAlarmStyle = prefs.getString(PREF_ALARM_STYLE_ACTIVE, "defconDrill");
 
         if (ACTION_START_GEOFENCE.equals(action)) {
             alarmFired     = false;
@@ -528,6 +822,28 @@ public class SnoozeTrackingService extends Service {
                 return;
             }
             startSubterraneanTracking();
+        } else if (ACTION_START_HYBRID.equals(action)) {
+            alarmFired     = false;
+            targetStopId   = prefs.getString(PREF_TRACKING_STOP_ID,   "");
+            targetStopName = prefs.getString(PREF_TRACKING_STOP_NAME, "");
+            targetLat      = Double.longBitsToDouble(prefs.getLong(PREF_TRACKING_LAT, 0));
+            targetLon      = Double.longBitsToDouble(prefs.getLong(PREF_TRACKING_LON, 0));
+            targetRadius   = prefs.getFloat(PREF_TRACKING_RADIUS, 300f);
+            targetSsid     = prefs.getString(PREF_TRACKING_SSID, null);
+            startHybridTracking();
+        } else if (ACTION_UPDATE_TARGETS.equals(action)) {
+            String json = prefs.getString(PREF_TARGETS_JSON, null);
+            if (json == null) { stopSelf(); return; }
+            targets.clear();
+            alarmFired = false;
+            try {
+                JSONArray arr = new JSONArray(json);
+                for (int i = 0; i < arr.length(); i++) {
+                    targets.add(TargetStop.fromJson(arr.getJSONObject(i)));
+                }
+            } catch (Exception ignored) {}
+            if (targets.isEmpty()) { stopSelf(); return; }
+            startMultiTargetTracking();
         } else {
             stopSelf();
         }
@@ -559,19 +875,20 @@ public class SnoozeTrackingService extends Service {
         String stopLabel = targetStopName != null && !targetStopName.isEmpty()
                 ? targetStopName : "your stop";
 
+        PendingIntent locAppPi = buildAppLaunchPi(12);
         Notification n = new NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("StopSnoozer – Location is off")
-                .setContentText("Turn on location to track " + stopLabel)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setColor(APP_COLOR)
+                .setContentTitle("Location Off — " + stopLabel)
+                .setContentText("Turn on location so StopSnoozer can track your stop")
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(
-                        "Your alarm for '" + stopLabel + "' activated but "
-                        + "location services are off. Turn them on so StopSnoozer "
-                        + "can alert you when you arrive."))
+                        "Your alarm for \"" + stopLabel + "\" is active but location "
+                        + "services are off. Turn them on to be alerted when you arrive."))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setAutoCancel(true)
-                .setContentIntent(settingsPi)
-                .addAction(android.R.drawable.ic_menu_mylocation, "Turn On Location", settingsPi)
+                .setContentIntent(locAppPi != null ? locAppPi : settingsPi)
+                .addAction(android.R.drawable.ic_menu_mylocation, "Location Settings", settingsPi)
                 .build();
 
         NotificationManager mgr = getSystemService(NotificationManager.class);
@@ -594,19 +911,20 @@ public class SnoozeTrackingService extends Service {
         String stopLabel = targetStopName != null && !targetStopName.isEmpty()
                 ? targetStopName : "your stop";
 
+        PendingIntent wifiAppPi = buildAppLaunchPi(13);
         Notification n = new NotificationCompat.Builder(this, ALARM_CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentTitle("StopSnoozer – Wi-Fi is off")
-                .setContentText("Turn on Wi-Fi to detect " + stopLabel)
+                .setSmallIcon(android.R.drawable.ic_menu_compass)
+                .setColor(APP_COLOR)
+                .setContentTitle("Wi-Fi Off — " + stopLabel)
+                .setContentText("Turn on Wi-Fi so StopSnoozer can detect the underground station")
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(
-                        "Your alarm for '" + stopLabel + "' activated but Wi-Fi is "
-                        + "turned off. Turn it on so StopSnoozer can detect the "
-                        + "underground station and alert you when you arrive."))
+                        "Your alarm for \"" + stopLabel + "\" needs Wi-Fi to detect the "
+                        + "underground platform. Turn it on to be alerted when you arrive."))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setAutoCancel(true)
-                .setContentIntent(settingsPi)
-                .addAction(android.R.drawable.ic_menu_share, "Turn On Wi-Fi", settingsPi)
+                .setContentIntent(wifiAppPi != null ? wifiAppPi : settingsPi)
+                .addAction(android.R.drawable.ic_menu_share, "Wi-Fi Settings", settingsPi)
                 .build();
 
         NotificationManager mgr = getSystemService(NotificationManager.class);
@@ -620,6 +938,18 @@ public class SnoozeTrackingService extends Service {
 
     // ── Notification helpers ───────────────────────────────────────────────
 
+    // App brand amber (#FFB000) — used as notification accent throughout
+    private static final int APP_COLOR = Color.parseColor("#FFB000");
+
+    /** Returns a PendingIntent that opens the main app activity. */
+    private PendingIntent buildAppLaunchPi(int requestCode) {
+        Intent i = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (i == null) return null;
+        i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        return PendingIntent.getActivity(this, requestCode, i,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
     private void createNotificationChannels() {
         NotificationManager mgr = getSystemService(NotificationManager.class);
         if (mgr == null) return;
@@ -629,14 +959,19 @@ public class SnoozeTrackingService extends Service {
                 NotificationManager.IMPORTANCE_LOW);
         tracking.setDescription("Active journey tracking — do not dismiss");
         tracking.setSound(null, null);
+        tracking.setLightColor(APP_COLOR);
+        tracking.enableLights(true);
         mgr.createNotificationChannel(tracking);
 
         // Alarm channel: no sound (we play it via Ringtone to support user-selected tunes)
         NotificationChannel alarm = new NotificationChannel(
                 ALARM_CHANNEL_ID, "StopSnoozer Alarm",
                 NotificationManager.IMPORTANCE_HIGH);
-        alarm.setDescription("Wake-up alert when approaching your stop");
+        alarm.setDescription("Wake-up alert when you arrive at your stop");
         alarm.enableVibration(true);
+        alarm.setVibrationPattern(new long[]{0, 400, 200, 400});
+        alarm.setLightColor(APP_COLOR);
+        alarm.enableLights(true);
         alarm.setSound(null, null); // sound played manually via Ringtone
         mgr.createNotificationChannel(alarm);
     }
@@ -648,19 +983,108 @@ public class SnoozeTrackingService extends Service {
                 this, 0, stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        return new NotificationCompat.Builder(this, TRACKING_CHANNEL_ID)
-                .setContentTitle("StopSnoozer")
+        PendingIntent launchPi = buildAppLaunchPi(10);
+
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, TRACKING_CHANNEL_ID)
+                .setContentTitle("StopSnoozer — Tracking Active")
                 .setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_menu_compass)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setColor(APP_COLOR)
                 .setOngoing(true)
                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPi)
-                .build();
+                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop Tracking", stopPi);
+
+        if (launchPi != null) b.setContentIntent(launchPi);
+        return b.build();
     }
 
     private void updateTrackingNotification(String text) {
         Notification notif = buildTrackingNotification(text);
         NotificationManager mgr = getSystemService(NotificationManager.class);
         if (mgr != null) mgr.notify(TRACKING_NOTIF_ID, notif);
+    }
+
+    /**
+     * Re-arms the service when the user swipes the app from Recents.
+     * Because android:stopWithTask="false" the service usually survives, so this
+     * AlarmManager ping is a belt-and-suspenders fallback for aggressive OEM killers
+     * (MIUI, One UI aggressive battery optimisation etc.).
+     * API 26+: must use getForegroundService() — startService() is blocked in background.
+     * API 23+: setAndAllowWhileIdle() fires even in Doze without needing exact-alarm permission.
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        String savedAction = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(PREF_TRACKING_ACTION, null);
+        if (savedAction == null) return;
+        Intent restartIntent = new Intent(this, SnoozeTrackingService.class);
+        PendingIntent pi;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            pi = PendingIntent.getForegroundService(this, 99, restartIntent,
+                    PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
+        } else {
+            pi = PendingIntent.getService(this, 99, restartIntent,
+                    PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE);
+        }
+        android.app.AlarmManager am = (android.app.AlarmManager) getSystemService(ALARM_SERVICE);
+        if (am == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP,
+                        System.currentTimeMillis() + 3_000L, pi);
+            } else {
+                am.set(android.app.AlarmManager.RTC_WAKEUP,
+                        System.currentTimeMillis() + 3_000L, pi);
+            }
+        } catch (SecurityException e) {
+            // Fallback if exact alarm permission not granted
+            am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP,
+                    System.currentTimeMillis() + 3_000L, pi);
+        }
+    }
+
+    // ── Multi-target stop descriptor ──────────────────────────────────────
+
+    private static final class TargetStop {
+        final String stopId;
+        final String stopName;
+        final double lat;
+        final double lon;
+        final float  radius;
+        final String ssid; // null = GPS-only; non-null = also WiFi
+
+        TargetStop(String stopId, String stopName, double lat, double lon, float radius, String ssid) {
+            this.stopId   = stopId   != null ? stopId   : "";
+            this.stopName = stopName != null ? stopName : "";
+            this.lat      = lat;
+            this.lon      = lon;
+            this.radius   = radius;
+            this.ssid     = ssid;
+        }
+
+        JSONObject toJson() {
+            try {
+                JSONObject o = new JSONObject();
+                o.put("stopId",   stopId);
+                o.put("stopName", stopName);
+                o.put("lat",      lat);
+                o.put("lon",      lon);
+                o.put("radius",   (double) radius);
+                if (ssid != null) o.put("ssid", ssid);
+                return o;
+            } catch (Exception e) { return new JSONObject(); }
+        }
+
+        static TargetStop fromJson(JSONObject o) {
+            return new TargetStop(
+                    o.optString("stopId"),
+                    o.optString("stopName"),
+                    o.optDouble("lat",    0),
+                    o.optDouble("lon",    0),
+                    (float) o.optDouble("radius", 300),
+                    o.has("ssid") ? o.optString("ssid") : null
+            );
+        }
     }
 }

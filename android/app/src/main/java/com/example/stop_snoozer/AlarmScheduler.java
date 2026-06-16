@@ -30,17 +30,18 @@ public class AlarmScheduler {
             String stopId, String stopName,
             double lat, double lon,
             String ssid, float radius,
-            String weekdaysJson, String specificDate) {
+            String weekdaysJson, String specificDate,
+            String tripGroupId) {
 
         save(ctx, alarmId, hour, minute, stopId, stopName,
-                lat, lon, ssid, radius, weekdaysJson, specificDate);
+                lat, lon, ssid, radius, weekdaysJson, specificDate, tripGroupId);
 
         long fireAt = nextFireTime(hour, minute, weekdaysJson, specificDate);
         if (fireAt < 0) return;
 
         PendingIntent trigger = buildPendingIntent(ctx, alarmId,
                 stopId, stopName, lat, lon, ssid, radius,
-                weekdaysJson, specificDate, hour, minute);
+                weekdaysJson, specificDate, hour, minute, tripGroupId);
 
         Intent launchIntent = ctx.getPackageManager()
                 .getLaunchIntentForPackage(ctx.getPackageName());
@@ -81,7 +82,8 @@ public class AlarmScheduler {
                     a.optString("ssid", null),
                     (float) a.optDouble("radius", 500.0),
                     a.getString("weekdays"),
-                    a.optString("specificDate", null));
+                    a.optString("specificDate", null),
+                    a.optString("tripGroupId", null));
         } catch (JSONException ignored) {}
     }
 
@@ -104,7 +106,8 @@ public class AlarmScheduler {
                         a.optString("ssid", null),
                         (float) a.optDouble("radius", 500.0),
                         a.getString("weekdays"),
-                        a.optString("specificDate", null));
+                        a.optString("specificDate", null),
+                        a.optString("tripGroupId", null));
             }
         } catch (JSONException ignored) {}
     }
@@ -116,7 +119,8 @@ public class AlarmScheduler {
             String stopId, String stopName,
             double lat, double lon,
             String ssid, float radius,
-            String weekdaysJson, String specificDate) {
+            String weekdaysJson, String specificDate,
+            String tripGroupId) {
         SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String existing = prefs.getString(KEY_ALARMS, "{}");
         try {
@@ -131,8 +135,10 @@ public class AlarmScheduler {
             if (ssid != null && !ssid.isEmpty()) a.put("ssid", ssid);
             a.put("radius",    radius);
             a.put("weekdays",  weekdaysJson);
-            if (specificDate != null && !specificDate.isEmpty())
+            if (specificDate  != null && !specificDate.isEmpty())
                 a.put("specificDate", specificDate);
+            if (tripGroupId != null && !tripGroupId.isEmpty())
+                a.put("tripGroupId", tripGroupId);
             all.put(alarmId, a);
             prefs.edit().putString(KEY_ALARMS, all.toString()).apply();
         } catch (JSONException ignored) {}
@@ -151,7 +157,7 @@ public class AlarmScheduler {
     private static PendingIntent buildPendingIntent(Context ctx, String alarmId,
             String stopId, String stopName, double lat, double lon,
             String ssid, float radius, String weekdaysJson, String specificDate,
-            int hour, int minute) {
+            int hour, int minute, String tripGroupId) {
         Intent i = new Intent(ctx, CommuteAlarmReceiver.class);
         i.putExtra("alarmId",      alarmId);
         i.putExtra("stopId",       stopId);
@@ -164,6 +170,8 @@ public class AlarmScheduler {
         i.putExtra("specificDate", specificDate);
         i.putExtra("hour",         hour);
         i.putExtra("minute",       minute);
+        if (tripGroupId != null && !tripGroupId.isEmpty())
+            i.putExtra("tripGroupId", tripGroupId);
         return PendingIntent.getBroadcast(ctx,
                 Math.abs(alarmId.hashCode()), i,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
