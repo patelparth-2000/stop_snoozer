@@ -28,27 +28,30 @@ public class CommuteAlarmReceiver extends BroadcastReceiver {
         String specificDate = intent.getStringExtra("specificDate");
         int    hour         = intent.getIntExtra("hour", 0);
         int    minute       = intent.getIntExtra("minute", 0);
+        String tripGroupId  = intent.getStringExtra("tripGroupId");
 
         // ── Launch the tracking service ────────────────────────────────────
+        // ACTION_ADD_TARGET merges this stop with any already-active tracking targets
+        // so manual saved-location tracking is not interrupted by a scheduled alarm.
         Intent svcIntent = new Intent(context, SnoozeTrackingService.class);
-
-        boolean useWifi = ssid != null && !ssid.isEmpty();
-        if (useWifi) {
-            svcIntent.setAction(SnoozeTrackingService.ACTION_START_WIFI);
-            svcIntent.putExtra("stopId",     stopId);
-            svcIntent.putExtra("stopName",   stopName);
-            svcIntent.putExtra("targetSsid", ssid);
-        } else {
-            svcIntent.setAction(SnoozeTrackingService.ACTION_START_GEOFENCE);
-            svcIntent.putExtra("stopId",       stopId);
-            svcIntent.putExtra("stopName",     stopName);
-            svcIntent.putExtra("lat",          lat);
-            svcIntent.putExtra("lon",          lon);
-            svcIntent.putExtra("radiusMetres", radius);
-        }
+        svcIntent.setAction(SnoozeTrackingService.ACTION_ADD_TARGET);
+        svcIntent.putExtra("stopId",       stopId);
+        svcIntent.putExtra("stopName",     stopName);
+        svcIntent.putExtra("lat",          lat);
+        svcIntent.putExtra("lon",          lon);
+        svcIntent.putExtra("radiusMetres", radius);
+        if (ssid != null && !ssid.isEmpty()) svcIntent.putExtra("ssid", ssid);
 
         // ContextCompat.startForegroundService is allowed from setAlarmClock() callbacks
         ContextCompat.startForegroundService(context, svcIntent);
+
+        // ── Persist trip group ID so Flutter can load all legs on resume ───
+        if (tripGroupId != null && !tripGroupId.isEmpty()) {
+            context.getSharedPreferences(SnoozeTrackingService.PREFS_NAME, Context.MODE_PRIVATE)
+                   .edit()
+                   .putString("pending_trip_group_id", tripGroupId)
+                   .apply();
+        }
 
         // ── Reschedule the next weekly occurrence ──────────────────────────
         boolean isRecurring = specificDate == null || specificDate.isEmpty();
