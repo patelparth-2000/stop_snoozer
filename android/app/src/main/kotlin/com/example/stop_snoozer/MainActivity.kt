@@ -1,10 +1,13 @@
 package com.example.stop_snoozer
 
 import android.app.Activity
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
@@ -72,12 +75,13 @@ class MainActivity : FlutterActivity() {
                     "startGeofence" -> {
                         val intent = Intent(this, SnoozeTrackingService::class.java).also {
                             it.action = SnoozeTrackingService.ACTION_START_GEOFENCE
-                            it.putExtra("stopId",       call.argument<String>("stopId")  ?: "")
-                            it.putExtra("stopName",     call.argument<String>("stopName") ?: "")
-                            it.putExtra("lat",          call.argument<Double>("lat")      ?: 0.0)
-                            it.putExtra("lon",          call.argument<Double>("lon")      ?: 0.0)
+                            it.putExtra("stopId",       call.argument<String>("stopId")     ?: "")
+                            it.putExtra("stopName",     call.argument<String>("stopName")   ?: "")
+                            it.putExtra("lat",          call.argument<Double>("lat")        ?: 0.0)
+                            it.putExtra("lon",          call.argument<Double>("lon")        ?: 0.0)
                             it.putExtra("radiusMetres",
                                 (call.argument<Double>("radiusMetres") ?: 500.0).toFloat())
+                            it.putExtra("alarmStyle",   call.argument<String>("alarmStyle") ?: "defconDrill")
                         }
                         ContextCompat.startForegroundService(this, intent)
                         result.success(null)
@@ -89,6 +93,35 @@ class MainActivity : FlutterActivity() {
                             it.putExtra("stopId",     call.argument<String>("stopId")     ?: "")
                             it.putExtra("stopName",   call.argument<String>("stopName")   ?: "")
                             it.putExtra("targetSsid", call.argument<String>("targetSsid") ?: "")
+                        }
+                        ContextCompat.startForegroundService(this, intent)
+                        result.success(null)
+                    }
+
+                    "updateTrackingTargets" -> {
+                        val targetsJson = try {
+                            val list = call.argument<List<Map<String, Any?>>>("targets") ?: emptyList()
+                            org.json.JSONArray(list.map { org.json.JSONObject(it.filterValues { v -> v != null } as Map<*, *>) }).toString()
+                        } catch (_: Exception) { "[]" }
+                        val intent = Intent(this, SnoozeTrackingService::class.java).also {
+                            it.action = SnoozeTrackingService.ACTION_UPDATE_TARGETS
+                            it.putExtra("targetsJson", targetsJson)
+                        }
+                        ContextCompat.startForegroundService(this, intent)
+                        result.success(null)
+                    }
+
+                    "startHybridSensing" -> {
+                        val intent = Intent(this, SnoozeTrackingService::class.java).also {
+                            it.action = SnoozeTrackingService.ACTION_START_HYBRID
+                            it.putExtra("stopId",       call.argument<String>("stopId")     ?: "")
+                            it.putExtra("stopName",     call.argument<String>("stopName")   ?: "")
+                            it.putExtra("targetSsid",   call.argument<String>("targetSsid") ?: "")
+                            it.putExtra("lat",          call.argument<Double>("lat")        ?: 0.0)
+                            it.putExtra("lon",          call.argument<Double>("lon")        ?: 0.0)
+                            it.putExtra("radiusMetres",
+                                (call.argument<Double>("radiusMetres") ?: 300.0).toFloat())
+                            it.putExtra("alarmStyle",   call.argument<String>("alarmStyle") ?: "defconDrill")
                         }
                         ContextCompat.startForegroundService(this, intent)
                         result.success(null)
@@ -188,24 +221,59 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    "canUseFullScreenIntent" -> {
+                        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                            nm.canUseFullScreenIntent()
+                        } else {
+                            true
+                        }
+                        result.success(granted)
+                    }
+
+                    "requestFullScreenIntent" -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            try {
+                                // Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENTS = API 34
+                                startActivity(
+                                    Intent(
+                                        "android.settings.MANAGE_APP_USE_FULL_SCREEN_INTENTS",
+                                        Uri.parse("package:$packageName")
+                                    ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+                                )
+                            } catch (_: Exception) {}
+                        }
+                        result.success(null)
+                    }
+
                     "scheduleCommuteAlarm" -> {
-                        val id       = call.argument<String>("alarmId")   ?: run { result.error("MISSING", "alarmId required", null); return@setMethodCallHandler }
-                        val stopId   = call.argument<String>("stopId")    ?: ""
-                        val stopName = call.argument<String>("stopName")  ?: ""
-                        val lat      = call.argument<Double>("lat")       ?: 0.0
-                        val lon      = call.argument<Double>("lon")       ?: 0.0
-                        val ssid     = call.argument<String>("ssid")
-                        val radius   = (call.argument<Double>("radius")   ?: 500.0).toFloat()
-                        val weekdays = call.argument<String>("weekdays")  ?: "[]"
-                        val specDate = call.argument<String>("specificDate")
-                        val hour     = call.argument<Int>("hour")         ?: 0
-                        val minute   = call.argument<Int>("minute")       ?: 0
+                        val id          = call.argument<String>("alarmId")     ?: run { result.error("MISSING", "alarmId required", null); return@setMethodCallHandler }
+                        val stopId      = call.argument<String>("stopId")      ?: ""
+                        val stopName    = call.argument<String>("stopName")    ?: ""
+                        val lat         = call.argument<Double>("lat")         ?: 0.0
+                        val lon         = call.argument<Double>("lon")         ?: 0.0
+                        val ssid        = call.argument<String>("ssid")
+                        val radius      = (call.argument<Double>("radius")     ?: 500.0).toFloat()
+                        val weekdays    = call.argument<String>("weekdays")    ?: "[]"
+                        val specDate    = call.argument<String>("specificDate")
+                        val hour        = call.argument<Int>("hour")           ?: 0
+                        val minute      = call.argument<Int>("minute")         ?: 0
+                        val tripGroupId = call.argument<String>("tripGroupId")
                         AlarmScheduler.scheduleAndSave(
                             this, id, hour, minute,
                             stopId, stopName, lat, lon,
-                            ssid, radius, weekdays, specDate
+                            ssid, radius, weekdays, specDate, tripGroupId
                         )
                         result.success(null)
+                    }
+
+                    "checkPendingTripGroup" -> {
+                        val prefs       = getSharedPreferences(SnoozeTrackingService.PREFS_NAME, MODE_PRIVATE)
+                        val tripGroupId = prefs.getString("pending_trip_group_id", null)
+                        if (tripGroupId != null) {
+                            prefs.edit().remove("pending_trip_group_id").apply()
+                        }
+                        result.success(tripGroupId)
                     }
 
                     "cancelCommuteAlarm" -> {
@@ -222,17 +290,27 @@ class MainActivity : FlutterActivity() {
                             result.success(null)
                         } else {
                             val distance = prefs.getFloat("pending_alarm_distance", 0f).toDouble()
+                            val firedAt  = prefs.getLong("pending_alarm_fired_at", 0L)
                             prefs.edit()
                                 .remove("pending_alarm_stop_id")
                                 .remove("pending_alarm_stop_name")
                                 .remove("pending_alarm_distance")
+                                .remove("pending_alarm_fired_at")
                                 .apply()
                             result.success(mapOf(
                                 "stopId"         to stopId,
                                 "stopName"       to (stopName ?: "Your Stop"),
-                                "distanceMetres" to distance
+                                "distanceMetres" to distance,
+                                "firedAt"        to firedAt,
+                                "countdownSecs"  to 5
                             ))
                         }
+                    }
+
+                    "switchLauncherIcon" -> {
+                        val index = call.argument<Int>("index") ?: 0
+                        switchLauncherIcon(index)
+                        result.success(null)
                     }
 
                     else -> result.notImplemented()
@@ -280,6 +358,32 @@ class MainActivity : FlutterActivity() {
         pending.success(mapOf("uri" to uri.toString(), "name" to name))
     }
 
+    // ── Dynamic launcher icon ─────────────────────────────────────────────
+
+    private fun switchLauncherIcon(themeIndex: Int) {
+        val aliases = listOf(
+            "com.example.stop_snoozer.MainActivityAlias_Amber",
+            "com.example.stop_snoozer.MainActivityAlias_Navy",
+            "com.example.stop_snoozer.MainActivityAlias_Forest",
+            "com.example.stop_snoozer.MainActivityAlias_Volcanic",
+            "com.example.stop_snoozer.MainActivityAlias_Galactic"
+        )
+        val pm = packageManager
+        aliases.forEachIndexed { i, alias ->
+            val state = if (i == themeIndex)
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+            else
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+            try {
+                pm.setComponentEnabledSetting(
+                    ComponentName(this, alias),
+                    state,
+                    PackageManager.DONT_KILL_APP
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
     // ── Alarm event channel ────────────────────────────────────────────────
 
     private fun setupAlarmEventChannel(engine: FlutterEngine) {
@@ -293,7 +397,9 @@ class MainActivity : FlutterActivity() {
                             val payload = mapOf(
                                 "stopId"         to (intent.getStringExtra("stopId")   ?: ""),
                                 "stopName"       to (intent.getStringExtra("stopName") ?: ""),
-                                "distanceMetres" to intent.getFloatExtra("distanceMetres", 0f).toDouble()
+                                "distanceMetres" to intent.getFloatExtra("distanceMetres", 0f).toDouble(),
+                                "firedAt"        to intent.getLongExtra("firedAt", 0L),
+                                "countdownSecs"  to intent.getIntExtra("countdownSecs", 5)
                             )
                             events.success(payload)
                         }
