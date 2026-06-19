@@ -17,6 +17,7 @@ class PlatformChannelService {
     required double lat,
     required double lon,
     required double radiusMetres,
+    String alarmStyle = 'defconDrill',
   }) async {
     try {
       await _method.invokeMethod<void>('startGeofence', {
@@ -25,6 +26,7 @@ class PlatformChannelService {
         'lat': lat,
         'lon': lon,
         'radiusMetres': radiusMetres,
+        'alarmStyle': alarmStyle,
       });
     } on PlatformException catch (_) {}
   }
@@ -40,6 +42,39 @@ class PlatformChannelService {
         'stopId': stopId,
         'stopName': stopName,
       });
+    } on PlatformException catch (_) {}
+  }
+
+  /// Runs GPS geofencing and WiFi SSID scanning simultaneously.
+  /// Whichever fires first triggers the alarm — GPS handles above-ground
+  /// approach while WiFi handles underground platform arrival.
+  Future<void> startHybridSensing({
+    required String targetSsid,
+    required String stopId,
+    required String stopName,
+    required double lat,
+    required double lon,
+    double radiusMetres = 300.0,
+    String alarmStyle = 'defconDrill',
+  }) async {
+    try {
+      await _method.invokeMethod<void>('startHybridSensing', {
+        'targetSsid':   targetSsid,
+        'stopId':       stopId,
+        'stopName':     stopName,
+        'lat':          lat,
+        'lon':          lon,
+        'radiusMetres': radiusMetres,
+        'alarmStyle':   alarmStyle,
+      });
+    } on PlatformException catch (_) {}
+  }
+
+  /// Replaces the full set of actively-tracked stops.
+  /// Passing an empty list stops the service.
+  Future<void> updateTrackingTargets(List<Map<String, dynamic>> targets) async {
+    try {
+      await _method.invokeMethod<void>('updateTrackingTargets', {'targets': targets});
     } on PlatformException catch (_) {}
   }
 
@@ -149,6 +184,7 @@ class PlatformChannelService {
     double radius = 500.0,
     required List<int> weekdays,
     String? specificDate,
+    String? tripGroupId,
   }) async {
     try {
       await _method.invokeMethod<void>('scheduleCommuteAlarm', {
@@ -163,8 +199,19 @@ class PlatformChannelService {
         'radius':       radius,
         'weekdays':     _encodeWeekdays(weekdays),
         'specificDate': specificDate,
+        'tripGroupId':  tripGroupId,
       });
     } on PlatformException catch (_) {}
+  }
+
+  /// Returns the trip group ID saved by CommuteAlarmReceiver when a
+  /// group-based alarm fired, then clears it. Returns null if none.
+  Future<String?> checkPendingTripGroup() async {
+    try {
+      return await _method.invokeMethod<String>('checkPendingTripGroup');
+    } on PlatformException catch (_) {
+      return null;
+    }
   }
 
   /// Cancels a previously scheduled commute alarm.
@@ -183,6 +230,12 @@ class PlatformChannelService {
     } on PlatformException catch (_) {
       return null;
     }
+  }
+
+  Future<void> switchLauncherIcon(int index) async {
+    try {
+      await _method.invokeMethod<void>('switchLauncherIcon', {'index': index});
+    } on PlatformException catch (_) {}
   }
 
   static String _encodeWeekdays(List<int> days) {

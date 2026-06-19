@@ -120,7 +120,7 @@ class _CountdownScreen extends StatelessWidget {
                       color: Colors.white.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(AppConstants.radiusMd),
                     ),
-                    child: const Icon(
+                    child: Icon(
                       Icons.close_rounded,
                       color: ColorConstants.textSecondary,
                       size: 20,
@@ -222,7 +222,7 @@ class _RingingScreen extends StatelessWidget {
                     color: Colors.white.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(AppConstants.radiusMd),
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.close_rounded,
                     color: ColorConstants.textSecondary,
                     size: 20,
@@ -283,7 +283,7 @@ class _SnoozeChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.snooze_rounded,
+            Icon(Icons.snooze_rounded,
                 color: ColorConstants.textSecondary, size: 16),
             const SizedBox(width: 6),
             Text(
