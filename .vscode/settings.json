@@ -1,0 +1,18 @@
+{
+  "java.project.sourcePaths": [
+    "android/app/src/main/java"
+  ],
+  "java.project.referencedLibraries": {
+    "include": [
+      "C:/Users/EC1050AX/AppData/Local/Android/sdk/platforms/android-35/android.jar",
+      "C:/Users/EC1050AX/.gradle/caches/modules-2/files-2.1/androidx.annotation/**/*.jar",
+      "C:/Users/EC1050AX/.gradle/caches/8.14/transforms/*/transformed/*/jars/classes.jar"
+    ],
+    "exclude": [
+      "**/*-sources.jar",
+      "**/*-javadoc.jar"
+    ]
+  },
+  "java.configuration.updateBuildConfiguration": "disabled",
+  "java.compile.nullAnalysis.mode": "disabled"
+}
