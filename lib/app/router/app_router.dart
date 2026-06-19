@@ -23,6 +23,7 @@ import '../shell/app_shell.dart';
 final _dashboardCubit  = DashboardCubit();
 final _tripConfigCubit = TripConfigCubit();
 final _calendarCubit   = CommuteAlarmsCubit();
+final _searchCubit     = SearchCubit();
 
 final appRouter = GoRouter(
   initialLocation: '/splash',
@@ -82,6 +83,7 @@ final appRouter = GoRouter(
           BlocProvider.value(value: _dashboardCubit),
           BlocProvider.value(value: _tripConfigCubit),
           BlocProvider.value(value: _calendarCubit),
+          BlocProvider.value(value: _searchCubit),
         ],
         child: AppShell(navigationShell: navigationShell),
       ),
@@ -102,13 +104,7 @@ final appRouter = GoRouter(
           routes: [
             GoRoute(
               path: '/search',
-              pageBuilder: (context, state) => _fade(
-                state,
-                BlocProvider(
-                  create: (_) => SearchCubit(),
-                  child: const SearchScreen(),
-                ),
-              ),
+              pageBuilder: (context, state) => _fade(state, const SearchScreen()),
             ),
           ],
         ),
