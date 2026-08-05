@@ -1,0 +1,18 @@
+# Copy to android/key.properties and fill in. That file is git-ignored.
+#
+# Generate the UPLOAD key (not the app signing key — Google holds that under
+# Play App Signing, which is what makes a lost upload key recoverable):
+#
+#   keytool -genkey -v -keystore C:/keys/stopsnoozer-upload.jks \
+#           -storetype JKS -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+#
+# Store the .jks OUTSIDE this repository and back it up in two places
+# (encrypted cloud + offline). Losing it is recoverable via Play support only
+# because Google holds the app signing key; losing both is not recoverable.
+#
+# storeFile takes forward slashes on Windows too.
+
+storePassword=CHANGEME
+keyPassword=CHANGEME
+keyAlias=upload
+storeFile=C:/keys/stopsnoozer-upload.jks

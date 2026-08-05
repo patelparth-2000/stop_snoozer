@@ -43,3 +43,22 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Graphify
+graphify-out/
+
+# Database build intermediates (tools/build_naptan_db.py). All regenerable and
+# large: the NaPTAN extract is ~200 MB and the OS Terrain 50 cache ~162 MB.
+# _os_terrain50/ is kept between runs on purpose so re-running is cheap.
+_naptan_temp.csv
+_naptan_temp.db
+_os_terrain50/
+_tfl_depths.csv
+_tfl_depths.xlsx
+_tfl_runtimes.xlsx
+
+# Release signing — never commit. The keystore itself lives outside the repo;
+# key.properties holds its passwords. See android/key.properties.example.
+/android/key.properties
+*.jks
+*.keystore
