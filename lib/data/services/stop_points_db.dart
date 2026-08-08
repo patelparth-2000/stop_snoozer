@@ -54,6 +54,38 @@ void _decompressIsolateEntry(_DecompressParams params) {
   }
 }
 
+/// Live statistics about the on-device database, for the diagnostics screen.
+class DbStats {
+  const DbStats({
+    required this.available,
+    this.stopCount = 0,
+    this.pageSizeBytes = 0,
+    this.schemaVersion = 0,
+    this.fileSizeBytes = 0,
+    this.routeSequenceCount = 0,
+    this.runTimeCount = 0,
+    this.stationDepthCount = 0,
+    this.hasFtsIndex = false,
+  });
+
+  final bool available;
+  final int stopCount;
+  final int pageSizeBytes;
+  final int schemaVersion;
+  final int fileSizeBytes;
+
+  /// Zero means no topology data — underground tracking is unavailable and the
+  /// app falls back to GPS. Worth surfacing, since it is invisible otherwise.
+  final int routeSequenceCount;
+  final int runTimeCount;
+  final int stationDepthCount;
+  final bool hasFtsIndex;
+
+  bool get hasTopology => routeSequenceCount > 0;
+
+  static const unavailable = DbStats(available: false);
+}
+
 // ── StopPointsDb singleton ────────────────────────────────────────────────────
 
 /// SQLite singleton for the UK NaPTAN stop-points database.
@@ -67,13 +99,72 @@ class StopPointsDb {
 
   static const String _assetPath   = 'assets/uk.db.gz';
   static const String _dbFileName  = 'uk.db';
-  // Matches PRAGMA user_version set in build_naptan_db.py.
-  // When the on-device DB has a lower version the asset is re-extracted.
-  static const int _requiredVersion = 2;
+  // Matches SCHEMA_VERSION in tools/build_naptan_db.py. An on-device database
+  // below this is migrated in place by _migrate() — see the note there on why
+  // this does not trigger re-extraction.
+  //   v3 — StopPointsFts full-text index
+  //   v4 — route topology + runtime Fingerprints table
+  //   v5 — StationDepths keyed by (stop_id, line_id); RunTimes.peak_seconds
+  //   v6 — StationDepths.platform_level_asl_m + Elevation table: the barometer
+  //        matches altitude differences, which depth below a local street
+  //        cannot express
+  static const int _requiredVersion = 6;
 
   Database? _db;
 
   bool get isReady => _db != null;
+
+  /// Direct handle for repositories that query tables beyond StopPoints
+  /// (route topology, fingerprints). Null until [initialize] completes.
+  Database? get rawDb => _db;
+
+  /// Live database statistics for the diagnostics screen.
+  ///
+  /// Queried rather than hardcoded: the previous screen displayed fixed strings
+  /// which silently became wrong as soon as the bundled asset was regenerated.
+  Future<DbStats> stats() async {
+    final db = _db;
+    if (db == null) return DbStats.unavailable;
+    try {
+      Future<int> count(String sql) async {
+        final r = await db.rawQuery(sql);
+        return (r.first.values.first as num?)?.toInt() ?? 0;
+      }
+
+      final stops = await count('SELECT COUNT(*) FROM StopPoints');
+      final pageSize = await count('PRAGMA page_size');
+      final version = await count('PRAGMA user_version');
+
+      // Topology tables exist from v4 but may legitimately be empty.
+      int sequences = 0, runTimes = 0, depths = 0;
+      try {
+        sequences = await count('SELECT COUNT(*) FROM RouteSequences');
+        runTimes = await count('SELECT COUNT(*) FROM RunTimes');
+        depths = await count('SELECT COUNT(*) FROM StationDepths');
+      } catch (_) {/* pre-v4 database */}
+
+      int bytes = 0;
+      try {
+        final path = db.path;
+        final f = File(path);
+        if (f.existsSync()) bytes = f.lengthSync();
+      } catch (_) {}
+
+      return DbStats(
+        available: true,
+        stopCount: stops,
+        pageSizeBytes: pageSize,
+        schemaVersion: version,
+        fileSizeBytes: bytes,
+        routeSequenceCount: sequences,
+        runTimeCount: runTimes,
+        stationDepthCount: depths,
+        hasFtsIndex: await _hasFts(),
+      );
+    } catch (_) {
+      return DbStats.unavailable;
+    }
+  }
 
   // ── Public API ────────────────────────────────────────────────────────────
 
@@ -85,15 +176,12 @@ class StopPointsDb {
 
     if (!File(dbPath).existsSync()) {
       await _decompressAsset(dbPath, onProgress: onProgress);
+    } else if (await _isUnreadable(dbPath)) {
+      // Corrupt or truncated (interrupted first-run extraction) — start over.
+      await File(dbPath).delete();
+      await _decompressAsset(dbPath, onProgress: onProgress);
     } else {
-      // Check user_version; re-extract if the bundled asset is newer
-      final stale = await _isStale(dbPath);
-      if (stale) {
-        await File(dbPath).delete();
-        await _decompressAsset(dbPath, onProgress: onProgress);
-      } else {
-        onProgress?.call(0.85);
-      }
+      onProgress?.call(0.85);
     }
 
     _db = await openDatabase(
@@ -101,30 +189,100 @@ class StopPointsDb {
       version: 1,
       onCreate: _onCreate,
       onOpen: (db) async {
-        await db.execute(
-          'CREATE INDEX IF NOT EXISTS idx_stop_name ON StopPoints(name);',
-        );
+        await _migrate(db);
         onProgress?.call(1.0);
       },
     );
   }
 
-  /// Returns true if the on-device DB predates [_requiredVersion].
-  Future<bool> _isStale(String dbPath) async {
+  /// Brings an existing database up to [_requiredVersion] in place.
+  ///
+  /// Migration rather than re-extraction, deliberately: the bundled asset may
+  /// itself predate the current schema (it is regenerated by a separate tooling
+  /// step, not on every code change). Keying re-extraction off `user_version`
+  /// would then delete and re-unpack the asset on *every* launch while never
+  /// actually gaining the new tables. Creating what is missing is both cheaper
+  /// and correct regardless of which asset revision shipped.
+  ///
+  /// Every statement is idempotent, so running this on an already-current
+  /// database costs a few `IF NOT EXISTS` checks.
+  Future<void> _migrate(Database db) async {
+    final version = await _userVersion(db);
+    if (version >= _requiredVersion) return;
+
+    // v3 — full-text search index
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stop_name ON StopPoints(name);',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stop_type ON StopPoints(transit_type);',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stop_latlon '
+      'ON StopPoints(latitude, longitude);',
+    );
+    await _createFtsIndex(db);
+
+    // v5 — StationDepths gained a line_id primary-key component and RunTimes a
+    // peak_seconds column. `CREATE TABLE IF NOT EXISTS` cannot alter an
+    // existing table, so a v4 database needs these dropped first.
+    //
+    // Safe to drop: both are read-only reference data sourced from the bundled
+    // asset, never user-generated. Fingerprints is deliberately NOT dropped —
+    // that one *is* user data, learned on their journeys.
+    if (version >= 4 && version < 5) {
+      await db.execute('DROP TABLE IF EXISTS StationDepths');
+      await db.execute('DROP TABLE IF EXISTS RunTimes');
+    }
+
+    // v6 — StationDepths gained platform_level_asl_m. Same reasoning as the v5
+    // drop above: reference data from the bundled asset, never user-generated,
+    // so recreating it is safe. An asset older than v6 has no altitudes to
+    // carry over anyway, and the engine falls back to depth matching until a
+    // v6 asset ships.
+    if (version >= 5 && version < 6) {
+      await db.execute('DROP TABLE IF EXISTS StationDepths');
+    }
+
+    // v4 — route topology. Created empty when the asset has no topology data;
+    // the underground engine treats an empty sequence as "no plan available"
+    // and the app falls back to GPS geofencing.
+    await _createTopologySchema(db);
+
+    await db.execute('PRAGMA user_version = $_requiredVersion');
+  }
+
+  Future<int> _userVersion(Database db) async {
+    try {
+      final rows = await db.rawQuery('PRAGMA user_version');
+      return rows.first.values.first as int? ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// True when the file cannot be opened or has no StopPoints table at all.
+  Future<bool> _isUnreadable(String dbPath) async {
     Database? db;
     try {
       db = await openDatabase(dbPath);
-      final rows = await db.rawQuery('PRAGMA user_version');
-      final version = rows.first.values.first as int? ?? 0;
-      return version < _requiredVersion;
+      final rows = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='StopPoints'",
+      );
+      return rows.isEmpty;
     } catch (_) {
-      return true; // can't read → treat as stale
+      return true;
     } finally {
       await db?.close();
     }
   }
 
-  /// Parameterised LIKE search. [transitTypes] narrows by `transit_type` column.
+  /// Full-text stop search. [transitTypes] narrows by `transit_type` column.
+  ///
+  /// Uses the FTS5 prefix index built by tools/build_naptan_db.py. Falls back to
+  /// a LIKE scan only when that index is absent (a pre-v3 extracted database, or
+  /// a build of SQLite without FTS5) — correct but slow on 500k rows, so the
+  /// fallback is a safety net, not a supported path.
   Future<List<StopPoint>> searchStops(
     String query, {
     List<String>? transitTypes,
@@ -134,6 +292,71 @@ class StopPointsDb {
     final q = query.trim().replaceAll(RegExp(r'\s+'), ' ');
     if (q.isEmpty) return const [];
 
+    if (await _hasFts()) {
+      try {
+        return await _searchFts(db, q, transitTypes);
+      } on DatabaseException {
+        // Corrupt or partially-built index — degrade rather than fail the search.
+        _ftsAvailable = false;
+      }
+    }
+    return _searchLike(db, q, transitTypes);
+  }
+
+  /// Builds an FTS5 MATCH expression that prefix-matches every token, so
+  /// "toot bro" finds "Tooting Broadway" while the user is still typing.
+  ///
+  /// Each token is double-quoted (embedded quotes doubled) so that FTS5
+  /// operators the user happens to type — NOT, OR, NEAR, ^, : — are treated as
+  /// literal text instead of syntax. Without this, a query like "St. John's"
+  /// or a bare "-" raises a syntax error mid-keystroke.
+  static String buildFtsMatchQuery(String input) {
+    final tokens = input
+        .split(RegExp(r'[^\p{L}\p{N}]+', unicode: true))
+        .where((t) => t.isNotEmpty);
+    return tokens.map((t) => '"${t.replaceAll('"', '""')}"*').join(' ');
+  }
+
+  Future<List<StopPoint>> _searchFts(
+    Database db,
+    String q,
+    List<String>? transitTypes,
+  ) async {
+    final match = buildFtsMatchQuery(q);
+    if (match.isEmpty) return const [];
+
+    final filterByType = transitTypes != null && transitTypes.isNotEmpty;
+    final typeClause = filterByType
+        ? 'AND s.transit_type IN (${List.filled(transitTypes.length, '?').join(',')})'
+        : '';
+
+    // Ordering, in priority order:
+    //   1. names that *start with* the query — almost always what was meant
+    //   2. rail/underground before bus: for "toot" a commuter wants Tooting
+    //      Broadway station, not "Tooting High Street (Stop TB)"
+    //   3. shorter names, then alphabetical, so results are stable
+    // The LIKE is evaluated only against the FTS candidate set, never the table.
+    final rows = await db.rawQuery(
+      'SELECT s.* FROM StopPointsFts f '
+      'JOIN StopPoints s ON s.rowid = f.rowid '
+      'WHERE StopPointsFts MATCH ? $typeClause '
+      'ORDER BY (CASE WHEN s.name LIKE ? THEN 0 ELSE 1 END), '
+      '         (CASE s.transit_type '
+      "            WHEN 'underground' THEN 0 WHEN 'train' THEN 0 "
+      "            WHEN 'dlr' THEN 1 WHEN 'tram' THEN 1 "
+      "            WHEN 'ferry' THEN 2 ELSE 3 END), "
+      '         length(s.name) ASC, s.name ASC '
+      'LIMIT ${AppConstants.searchMaxResults}',
+      [match, ...?(filterByType ? transitTypes : null), '$q%'],
+    );
+    return rows.map(StopPoint.fromMap).toList();
+  }
+
+  Future<List<StopPoint>> _searchLike(
+    Database db,
+    String q,
+    List<String>? transitTypes,
+  ) async {
     if (transitTypes == null || transitTypes.isEmpty) {
       final rows = await db.query(
         'StopPoints',
@@ -153,6 +376,25 @@ class StopPointsDb {
       ['%$q%', ...transitTypes],
     );
     return rows.map(StopPoint.fromMap).toList();
+  }
+
+  /// Cached probe for the FTS5 index. Checked once per app run.
+  bool? _ftsAvailable;
+
+  Future<bool> _hasFts() async {
+    final cached = _ftsAvailable;
+    if (cached != null) return cached;
+    final db = _db;
+    if (db == null) return false;
+    try {
+      final rows = await db.rawQuery(
+        "SELECT name FROM sqlite_master "
+        "WHERE type='table' AND name='StopPointsFts' LIMIT 1",
+      );
+      return _ftsAvailable = rows.isNotEmpty;
+    } catch (_) {
+      return _ftsAvailable = false;
+    }
   }
 
   Future<List<StopPoint>> getClosestStops(
@@ -276,6 +518,130 @@ class StopPointsDb {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_stop_name ON StopPoints(name);',
     );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stop_type ON StopPoints(transit_type);',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_stop_latlon '
+      'ON StopPoints(latitude, longitude);',
+    );
+  }
+
+  /// Mirrors build_search_index() in tools/build_naptan_db.py so the dev-seed
+  /// path exercises the same FTS5 query code as the shipped asset. Without this,
+  /// search would silently take the LIKE fallback in every dev build and the
+  /// real query would go untested until release.
+  Future<void> _createFtsIndex(Database db) async {
+    try {
+      await db.execute('''
+        CREATE VIRTUAL TABLE IF NOT EXISTS StopPointsFts USING fts5(
+          name,
+          content='StopPoints',
+          content_rowid='rowid',
+          tokenize="unicode61 remove_diacritics 2",
+          prefix='2 3 4'
+        )
+      ''');
+      final counts = await db.rawQuery('SELECT count(*) AS c FROM StopPointsFts');
+      if ((counts.first['c'] as int? ?? 0) == 0) {
+        await db.execute(
+          'INSERT INTO StopPointsFts(rowid, name) SELECT rowid, name FROM StopPoints',
+        );
+      }
+    } catch (_) {
+      // No FTS5 in this SQLite build — searchStops() falls back to LIKE.
+      _ftsAvailable = false;
+    }
+  }
+
+  /// Mirrors create_topology_schema() in tools/build_naptan_db.py.
+  ///
+  /// Kept in sync by hand. If these diverge, the app will read columns the
+  /// generated asset does not have, so treat any change here as requiring the
+  /// same change there (and a SCHEMA_VERSION bump in both).
+  Future<void> _createTopologySchema(Database db) async {
+    const statements = [
+      '''
+      CREATE TABLE IF NOT EXISTS Lines (
+        line_id TEXT PRIMARY KEY, name TEXT NOT NULL,
+        mode TEXT NOT NULL, colour TEXT
+      )''',
+      '''
+      CREATE TABLE IF NOT EXISTS RouteSequences (
+        line_id   TEXT NOT NULL, direction TEXT NOT NULL,
+        branch_id INTEGER NOT NULL DEFAULT 0,
+        seq_index INTEGER NOT NULL, stop_id TEXT NOT NULL,
+        PRIMARY KEY (line_id, direction, branch_id, seq_index)
+      )''',
+      'CREATE INDEX IF NOT EXISTS idx_seq_stop ON RouteSequences(stop_id)',
+      'CREATE INDEX IF NOT EXISTS idx_seq_line_dir '
+          'ON RouteSequences(line_id, direction, branch_id, seq_index)',
+      '''
+      CREATE TABLE IF NOT EXISTS Branches (
+        line_id TEXT NOT NULL, direction TEXT NOT NULL,
+        stop_id TEXT NOT NULL, branch_id INTEGER NOT NULL,
+        branch_label TEXT,
+        PRIMARY KEY (line_id, direction, stop_id, branch_id)
+      )''',
+      // `seconds` is the UNIMPEDED run time (train moving, no holds) — a
+      // physical floor, used as the timing gate's lower bound. `peak_seconds`
+      // informs the upper bound only, so congestion widens the window without
+      // raising the floor and rejecting legitimate fast off-peak runs.
+      '''
+      CREATE TABLE IF NOT EXISTS RunTimes (
+        line_id TEXT NOT NULL, from_stop TEXT NOT NULL, to_stop TEXT NOT NULL,
+        seconds INTEGER NOT NULL, peak_seconds INTEGER,
+        source TEXT NOT NULL DEFAULT 'estimate',
+        PRIMARY KEY (line_id, from_stop, to_stop)
+      )''',
+      // Keyed by (stop_id, line_id): depth is a property of the platform, not
+      // the station. Bank is 20.5 m on the Central line and 29.6 m on the
+      // Northern — a station-level average would be ~9 m wrong at exactly the
+      // interchanges where the barometer needs to be precise.
+      //
+      // platform_level_asl_m is what the barometer is actually matched
+      // against. A barometer reads a *change* in altitude, so the expected
+      // reading between two stations is the difference of their platform
+      // altitudes. depth_metres cannot express that — it is measured from each
+      // station's own street, and streets differ by up to ~76 m across the
+      // network against a 12 m tolerance. Depth is kept for display.
+      '''
+      CREATE TABLE IF NOT EXISTS StationDepths (
+        stop_id TEXT NOT NULL, line_id TEXT NOT NULL DEFAULT '',
+        depth_metres REAL NOT NULL,
+        platform_level_asl_m REAL,
+        source TEXT NOT NULL DEFAULT 'estimate',
+        PRIMARY KEY (stop_id, line_id)
+      )''',
+      // Ground elevation, metres above Ordnance Datum, from OS Terrain 50.
+      // For Underground stations it converts a published depth into an
+      // altitude; for the DLR, Elizabeth line and Overground — where no open
+      // dataset publishes platform depths at all — it *is* the platform
+      // altitude, and the only barometric prior those lines get.
+      '''
+      CREATE TABLE IF NOT EXISTS Elevation (
+        stop_id TEXT PRIMARY KEY,
+        ground_elev_m REAL NOT NULL,
+        easting INTEGER, northing INTEGER,
+        source TEXT NOT NULL DEFAULT 'os_terrain_50'
+      )''',
+      // U13 — self-learned fingerprints. Device-local and never uploaded; this
+      // one is not in the shipped asset because it is written at runtime.
+      '''
+      CREATE TABLE IF NOT EXISTS Fingerprints (
+        stop_id      TEXT NOT NULL,
+        kind         TEXT NOT NULL,          -- 'bssid' | 'cell'
+        identifier   TEXT NOT NULL,
+        observations INTEGER NOT NULL DEFAULT 1,
+        last_seen_ms INTEGER NOT NULL,
+        PRIMARY KEY (stop_id, kind, identifier)
+      )''',
+      'CREATE INDEX IF NOT EXISTS idx_fp_lookup '
+          'ON Fingerprints(kind, identifier)',
+    ];
+    for (final s in statements) {
+      await db.execute(s);
+    }
   }
 
   /// Creates a fresh seeded database when uk.db.gz is absent (dev builds).
@@ -288,14 +654,13 @@ class StopPointsDb {
       targetPath,
       version: 1,
       onCreate: _onCreate,
-      onOpen: (db) async {
-        await db.execute(
-          'CREATE INDEX IF NOT EXISTS idx_stop_name ON StopPoints(name);',
-        );
-      },
     );
     onProgress?.call(0.50);
     await _seedData(_db!);
+    // Must run after seeding: the FTS table is populated from StopPoints.
+    await _createFtsIndex(_db!);
+    await _createTopologySchema(_db!);
+    await _db!.execute('PRAGMA user_version = $_requiredVersion');
     onProgress?.call(1.00);
   }
 

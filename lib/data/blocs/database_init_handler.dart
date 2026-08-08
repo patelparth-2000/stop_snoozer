@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../repositories/route_topology_repository.dart';
 import '../services/stop_points_db.dart';
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -67,6 +70,15 @@ class DatabaseInitHandler extends Bloc<DatabaseInitEvent, DatabaseInitState> {
       await _db.initialize(
         onProgress: (p) => add(DecompressionProgressUpdatedEvent(p)),
       );
+      // Awaited, unlike the housekeeping below: nothing may observe a radio
+      // identifier before the stored consent answer is back in memory. The
+      // default is "denied", so a failure here fails closed.
+      await RouteTopologyRepository.loadConsent();
+      // Age out learned fingerprints. TfL is migrating station Wi-Fi providers,
+      // so BSSIDs turn over wholesale and stale entries would keep matching
+      // access points that no longer exist. Unawaited: housekeeping must never
+      // delay the splash screen.
+      unawaited(RouteTopologyRepository().maintain());
       emit(const DatabaseReadyState());
     } catch (e) {
       emit(DatabaseErrorState(e.toString()));
