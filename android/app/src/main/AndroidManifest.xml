@@ -8,6 +8,13 @@
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- ServiceState / SignalStrength callbacks — detects Underground network entry/exit.
+         NOT MODIFY_PHONE_STATE: that is system/signature-only and unavailable to us,
+         which is why Cell-ID is opportunistic rather than primary. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Activity Transition API — cheap secondary confirmer only.
+         Reports generic IN_VEHICLE and cannot distinguish bus from train. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
