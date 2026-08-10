@@ -1,4 +1,4 @@
-package com.example.stop_snoozer;
+package com.stopsnoozer.app;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -23,6 +23,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 
 import androidx.annotation.NonNull;
@@ -59,7 +60,14 @@ public class SnoozeTrackingService extends Service {
     static final String ACTION_ALARM_TRIGGER  = "com.stopsnoozer.app.ALARM_TRIGGER";
     static final String ACTION_STOP_ALARM     = "com.stopsnoozer.app.STOP_ALARM";
     static final String ACTION_SNOOZE         = "com.stopsnoozer.app.SNOOZE_ALARM";
+    static final String ACTION_SELF_TEST_FIRE = "com.stopsnoozer.app.SELF_TEST_FIRE";
+    /** Field-test only: records "I am arriving right now" against the log. */
+    static final String ACTION_GROUND_TRUTH   = "com.stopsnoozer.app.GROUND_TRUTH";
+    static final String EXTRA_GROUND_TRUTH_LABEL = "groundTruthLabel";
     static final String EXTRA_SNOOZE_MINUTES  = "snoozeMinutes";
+
+    /** Broadcast when the early "get ready" nudge fires (two-stage alerts). */
+    static final String ACTION_EARLY_NUDGE    = "com.stopsnoozer.app.EARLY_NUDGE";
 
     // ── Preferences ────────────────────────────────────────────────────────
     static final String PREFS_NAME          = "snoozer_prefs";
@@ -82,9 +90,19 @@ public class SnoozeTrackingService extends Service {
     private static final int    TRACKING_NOTIF_ID    = 1001;
     private static final int    ALARM_NOTIF_ID       = 1002;
     private static final int    LOCATION_OFF_NOTIF_ID = 1003;
+    private static final int    EARLY_NUDGE_NOTIF_ID  = 1004;
 
     private static final int WIFI_SCAN_INTERVAL_MS           = 8_000;
     private static final int WIFI_SCAN_THROTTLED_INTERVAL_MS = 32_000;
+
+    /**
+     * Two-stage alerts. The early nudge fires at this multiple of the wake radius
+     * so the user has time to gather bags and stand up before the firm alarm.
+     * 2.5× a 500 m radius ≈ 1.25 km out, roughly 60–90 s at suburban rail speed.
+     */
+    private static final float EARLY_NUDGE_RADIUS_MULTIPLIER = 2.5f;
+    /** Never nudge further out than this, or long-distance rail nudges far too early. */
+    private static final float EARLY_NUDGE_MAX_METRES        = 2_000f;
     // Seconds the user has to dismiss the alarm screen before the ringtone starts
     static final int ALARM_COUNTDOWN_SECS = 3;
 
@@ -116,6 +134,17 @@ public class SnoozeTrackingService extends Service {
 
     // Multi-target list — used by UPDATE_TARGETS (manual saved locations)
     private final ArrayList<TargetStop> targets = new ArrayList<>();
+
+    // ── Underground stack (v2) ─────────────────────────────────────────────
+    private UndergroundEngine     undergroundEngine;
+    private WifiPresenceDetector  wifiPresence;
+    private CellObserver          cellObserver;
+    private SensorLogger          sensorLogger;
+
+    static final String ACTION_START_UNDERGROUND = "com.stopsnoozer.app.START_UNDERGROUND";
+    static final String EXTRA_JOURNEY_PLAN       = "journeyPlan";
+    static final String EXTRA_ENABLE_LOGGING     = "enableSensorLogging";
+    static final String PREF_JOURNEY_PLAN        = "tracking_journey_plan";
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -279,6 +308,48 @@ public class SnoozeTrackingService extends Service {
                 int minutes = intent.getIntExtra(EXTRA_SNOOZE_MINUTES, 5);
                 snoozeAlarm(minutes);
                 break;
+
+            case ACTION_START_UNDERGROUND: {
+                alarmFired = false;
+                String planJson = intent.getStringExtra(EXTRA_JOURNEY_PLAN);
+                boolean logging = intent.getBooleanExtra(EXTRA_ENABLE_LOGGING, false);
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                        .putString(PREF_JOURNEY_PLAN, planJson)
+                        .apply();
+                saveTrackingState(ACTION_START_UNDERGROUND);
+                startUndergroundTracking(planJson, logging);
+                break;
+            }
+
+            case ACTION_GROUND_TRUTH: {
+                // Field-test marker. Without this the sensor logs are just
+                // traces with nothing to score them against, and no threshold
+                // can be calibrated from them.
+                if (sensorLogger != null) {
+                    String label = intent.getStringExtra(EXTRA_GROUND_TRUTH_LABEL);
+                    sensorLogger.logGroundTruth(
+                            label != null && !label.isEmpty() ? label : "arrival");
+                    if (undergroundEngine != null) {
+                        sensorLogger.logNote("engine believed index="
+                                + undergroundEngine.currentIndex()
+                                + " confidence=" + String.format(java.util.Locale.US,
+                                        "%.2f", undergroundEngine.confidence()));
+                    }
+                }
+                break;
+            }
+
+            case ACTION_SELF_TEST_FIRE:
+                // Reached only via CommuteAlarmReceiver, i.e. the OS really did
+                // wake us. Fire the alarm UI with no tracking targets attached.
+                alarmFired      = false;
+                targets.clear();
+                targetStopId    = "__selftest__";
+                targetStopName  = "Alarm Test — it works";
+                currentAlarmStyle = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                        .getString(PREF_ALARM_STYLE_ACTIVE, "defconDrill");
+                triggerAlarm(targetStopId, targetStopName, 0f);
+                break;
         }
         return START_STICKY;
     }
@@ -311,13 +382,71 @@ public class SnoozeTrackingService extends Service {
                     triggerAlarm(t.stopId, t.stopName, dist[0]);
                     return;
                 }
+                maybeEarlyNudge(t.stopId, t.stopName, t.radius, dist[0]);
             }
         } else {
             Location.distanceBetween(loc.getLatitude(), loc.getLongitude(),
                     targetLat, targetLon, dist);
-            if (dist[0] <= targetRadius)
+            if (dist[0] <= targetRadius) {
                 triggerAlarm(targetStopId, targetStopName, dist[0]);
+            } else {
+                maybeEarlyNudge(targetStopId, targetStopName, targetRadius, dist[0]);
+            }
         }
+    }
+
+    // ── Two-stage alerts (early nudge → firm alarm) ────────────────────────
+
+    /** Stop IDs already nudged, so the gentle alert fires at most once each. */
+    private final java.util.HashSet<String> nudgedStopIds = new java.util.HashSet<>();
+
+    /**
+     * Posts the gentle "start getting ready" alert when the user first crosses
+     * the outer ring, well before the firm alarm at the wake radius.
+     *
+     * <p>Fires once per stop per journey. Silent and low-priority by design: its
+     * job is to be noticed if the user is awake, not to wake them — that is the
+     * firm alarm's job, and duplicating it would train users to ignore both.
+     */
+    private void maybeEarlyNudge(String stopId, String stopName,
+                                 float radius, float distance) {
+        if (stopId == null || stopId.isEmpty()) return;
+        if (nudgedStopIds.contains(stopId)) return;
+
+        float nudgeAt = Math.min(radius * EARLY_NUDGE_RADIUS_MULTIPLIER,
+                                 Math.max(radius, EARLY_NUDGE_MAX_METRES));
+        // Only nudge if the outer ring is meaningfully outside the alarm radius,
+        // otherwise both alerts land within seconds of each other.
+        if (nudgeAt <= radius * 1.2f) return;
+        if (distance > nudgeAt) return;
+
+        nudgedStopIds.add(stopId);
+
+        String label = stopName != null && !stopName.isEmpty() ? stopName : "your stop";
+        PendingIntent launchPi = buildAppLaunchPi(14);
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, TRACKING_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                .setColor(APP_COLOR)
+                .setContentTitle("Get ready — " + label + " is next")
+                .setContentText(Math.round(distance) + "m to go")
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(
+                        "You're about " + Math.round(distance) + "m from " + label
+                        + ". The full alarm will sound when you arrive."))
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setAutoCancel(true);
+        if (launchPi != null) b.setContentIntent(launchPi);
+
+        NotificationManager mgr = getSystemService(NotificationManager.class);
+        if (mgr != null) mgr.notify(EARLY_NUDGE_NOTIF_ID, b.build());
+
+        Intent bc = new Intent(ACTION_EARLY_NUDGE);
+        bc.putExtra("stopId",         stopId);
+        bc.putExtra("stopName",       stopName);
+        bc.putExtra("distanceMetres", distance);
+        sendBroadcast(bc);
     }
 
     @SuppressWarnings("MissingPermission")
@@ -444,6 +573,9 @@ public class SnoozeTrackingService extends Service {
             public void run() {
                 if (alarmFired || wifiManager == null) return;
                 boolean accepted = wifiManager.startScan();
+                // Cell polling shares this cadence: both are opportunistic
+                // corroboration and neither should run as a busy loop.
+                evaluateCellResults();
                 long next = accepted ? WIFI_SCAN_INTERVAL_MS : WIFI_SCAN_THROTTLED_INTERVAL_MS;
                 wifiScanHandler.postDelayed(this, next);
             }
@@ -452,30 +584,54 @@ public class SnoozeTrackingService extends Service {
         updateTrackingNotification("Underground sensing: " + targetStopName);
     }
 
-    @SuppressWarnings("deprecation")
+    /**
+     * Wi-Fi presence evaluation (U3).
+     *
+     * <p>Previously this matched a per-stop SSID string to identify the station.
+     * That model was unsound: Underground SSIDs are provider-branded and
+     * identical across the whole network, so a match said nothing about *which*
+     * station. Identity now comes from the route model; Wi-Fi only corroborates
+     * that we are at a station at all.
+     *
+     * <p>When an underground journey plan is active, a station-grade hit is
+     * forwarded to {@link UndergroundEngine} as corroboration. Without a plan we
+     * have no sequence to reason about, so a bare hit is not sufficient grounds
+     * to fire an alarm — doing so is what produced false triggers at every
+     * station on the line.
+     */
     private void evaluateWifiResults() {
-        if (wifiManager == null) return;
-        List<ScanResult> results = wifiManager.getScanResults();
+        if (wifiPresence == null || undergroundEngine == null) return;
+        WifiPresenceDetector.Presence p = wifiPresence.evaluate();
+        if (!p.atStation) return;
 
-        if (!targets.isEmpty()) {
-            // Multi-target mode: match any target's SSID
-            for (TargetStop t : targets) {
-                if (t.ssid == null) continue;
-                for (ScanResult r : results) {
-                    if (t.ssid.equalsIgnoreCase(r.SSID) || t.ssid.equalsIgnoreCase(r.BSSID)) {
-                        triggerAlarm(t.stopId, t.stopName, 0f);
-                        return;
-                    }
-                }
-            }
-        } else {
-            // Single-target mode
-            if (targetSsid == null) return;
-            for (ScanResult r : results) {
-                if (targetSsid.equalsIgnoreCase(r.SSID) || targetSsid.equalsIgnoreCase(r.BSSID)) {
-                    triggerAlarm(targetStopId, targetStopName, 0f);
-                    return;
-                }
+        // Corroboration, NOT an absolute fix. Wi-Fi presence cannot say which
+        // station this is, so the engine advances only if its own timing gate
+        // already agrees, and only once per station.
+        undergroundEngine.corroborateArrival("wifi_presence");
+    }
+
+    /**
+     * Polls for a fresh cell observation and uses it as corroboration.
+     *
+     * <p>Runs on the same throttled cadence as Wi-Fi rather than continuously:
+     * underground this usually returns nothing, and when it does return
+     * something the reading is only trustworthy if it is under 5 s old — which
+     * {@link CellObserver} enforces. A stale cached cell from the previous
+     * station is worse than no reading, so an empty result is treated as "no
+     * information", never as "position unchanged".
+     */
+    private void evaluateCellResults() {
+        if (cellObserver == null || undergroundEngine == null) return;
+        java.util.List<CellObserver.Observation> fresh = cellObserver.observeFresh();
+        if (fresh.isEmpty()) return;
+
+        // A registered cell means the handset actually attached to a base
+        // station, which in tunnel conditions effectively only happens at a
+        // platform with coverage.
+        for (CellObserver.Observation o : fresh) {
+            if (o.registered) {
+                undergroundEngine.corroborateArrival("cell_registered");
+                return;
             }
         }
     }
@@ -521,6 +677,11 @@ public class SnoozeTrackingService extends Service {
         alarmFired     = true;
         targetStopId   = stopId;
         targetStopName = stopName;
+
+        // The firm alarm supersedes the gentle nudge — drop the stale banner.
+        nudgedStopIds.remove(stopId);
+        NotificationManager nudgeMgr = getSystemService(NotificationManager.class);
+        if (nudgeMgr != null) nudgeMgr.cancel(EARLY_NUDGE_NOTIF_ID);
 
         // Multi-target: remove fired stop; keep sensors running for remaining targets
         boolean hasRemaining = false;
@@ -768,6 +929,8 @@ public class SnoozeTrackingService extends Service {
 
     private void clearTrackingState() {
         targets.clear();
+        nudgedStopIds.clear();
+        clearBeliefState();
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                 .remove(PREF_TRACKING_ACTION)
                 .remove(PREF_TRACKING_STOP_ID)
@@ -831,6 +994,15 @@ public class SnoozeTrackingService extends Service {
             targetRadius   = prefs.getFloat(PREF_TRACKING_RADIUS, 300f);
             targetSsid     = prefs.getString(PREF_TRACKING_SSID, null);
             startHybridTracking();
+        } else if (ACTION_START_UNDERGROUND.equals(action)) {
+            alarmFired = false;
+            String planJson = prefs.getString(PREF_JOURNEY_PLAN, null);
+            if (planJson == null) { stopSelf(); return; }
+            // Position is not restored: the engine's belief was in memory and is
+            // gone. Restarting from the plan's boarding station is wrong, so the
+            // engine will run at reduced confidence and the fail-safe will wake
+            // the user early rather than assert a position it cannot justify.
+            startUndergroundTracking(planJson, false);
         } else if (ACTION_UPDATE_TARGETS.equals(action)) {
             String json = prefs.getString(PREF_TARGETS_JSON, null);
             if (json == null) { stopSelf(); return; }
@@ -934,6 +1106,272 @@ public class SnoozeTrackingService extends Service {
     private void stopSensors() {
         stopAboveGroundTracking();
         stopSubterraneanTracking();
+        stopUndergroundTracking();
+    }
+
+    // ── Underground sensor-fusion tracking (v2) ─────────────────────────────
+
+    /**
+     * Starts the barometer/accelerometer/timing engine for a pre-selected route.
+     *
+     * <p>Runs alongside GPS rather than replacing it: above ground GPS is far
+     * more reliable (~98%), so the engine is the fallback that takes over when
+     * the signal disappears — not a substitute for it.
+     */
+    private void startUndergroundTracking(String planJson, boolean enableLogging) {
+        JourneyPlan plan = JourneyPlan.fromJson(planJson);
+        if (plan == null) {
+            // Malformed or empty plan: fall back to plain GPS rather than
+            // silently tracking nothing.
+            if (isLocationEnabled()) startAboveGroundTracking();
+            return;
+        }
+
+        sensorLogger = SensorLogger.createIfEnabled(
+                this, enableLogging, plan.lineId);
+        wifiPresence = new WifiPresenceDetector(this, sensorLogger);
+        cellObserver = new CellObserver(this, sensorLogger);
+        startServiceStateWatch();
+
+        undergroundEngine = new UndergroundEngine(this, plan,
+                new UndergroundEngine.Listener() {
+                    @Override
+                    public void onTargetReached(String stopId, String stopName) {
+                        triggerAlarm(stopId, stopName, 0f);
+                    }
+
+                    @Override
+                    public void onLowConfidenceApproach(String stopId, String stopName,
+                                                        String reason) {
+                        // Honest early alarm — never a silent guess.
+                        triggerLowConfidenceAlarm(stopId, stopName, reason);
+                    }
+
+                    @Override
+                    public void onPositionChanged(int index, String stopName,
+                                                  double confidence) {
+                        updateTrackingNotification(String.format(
+                                java.util.Locale.UK,
+                                "Underground: %s (%.0f%% confident)",
+                                stopName, confidence * 100));
+                    }
+
+                    @Override
+                    public void onSurfaced() {
+                        // Back above ground — GPS is authoritative again.
+                        if (isLocationEnabled() && locationCallback == null) {
+                            startAboveGroundTracking();
+                        }
+                    }
+
+                    @Override
+                    public void onSubmerged() {
+                        // GPS cannot fix at platform depth; keeping the receiver
+                        // alive down here is the largest avoidable battery cost
+                        // in the whole underground path.
+                        stopAboveGroundTracking();
+                        if (sensorLogger != null) {
+                            sensorLogger.logNote("submerged: GPS stopped");
+                        }
+                    }
+
+                    @Override
+                    public void onPersistState(int index, double conf, long msSinceArrival) {
+                        saveBeliefState(index, conf, msSinceArrival);
+                    }
+                }, sensorLogger);
+
+        boolean ok = undergroundEngine.start();
+        if (!ok) {
+            undergroundEngine = null;
+            if (isLocationEnabled()) startAboveGroundTracking();
+            return;
+        }
+
+        restoreBeliefStateIfAny();
+
+        // GPS in parallel: it works at shallow/open-air stations and is the
+        // strongest available fix whenever it is present.
+        if (isLocationEnabled()) startAboveGroundTracking();
+        // Opportunistic Wi-Fi corroboration on the throttle-aware cadence.
+        if (wifiPresence.isWifiEnabled()) startSubterraneanTracking();
+
+        updateTrackingNotification("Underground tracking active");
+    }
+
+    // ── Telephony service state (network entry/exit, U10) ──────────────────
+
+    private android.telephony.PhoneStateListener phoneStateListener;
+    private boolean lastHadService = true;
+
+    /**
+     * Watches for cellular service loss and reacquisition.
+     *
+     * <p>Losing all service is a strong, cheap indicator of entering a tunnel,
+     * and regaining it marks a station with coverage or the surface. Unlike
+     * reading cell identities this needs no fresh-data guarantees — the
+     * transition itself is the signal, so stale-cache concerns do not apply.
+     *
+     * <p>Purely advisory: it feeds logging and corroboration, never an alarm on
+     * its own. Coverage is patchy and improving as the Boldyn rollout proceeds,
+     * so its meaning changes over time and must not be load-bearing.
+     */
+    private void startServiceStateWatch() {
+        if (ContextCompat.checkSelfPermission(this,
+                android.Manifest.permission.READ_PHONE_STATE)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        android.telephony.TelephonyManager tm =
+                (android.telephony.TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+        if (tm == null) return;
+
+        phoneStateListener = new android.telephony.PhoneStateListener() {
+            @Override
+            @SuppressWarnings("deprecation")
+            public void onServiceStateChanged(android.telephony.ServiceState serviceState) {
+                boolean hasService = serviceState.getState()
+                        == android.telephony.ServiceState.STATE_IN_SERVICE;
+                if (hasService == lastHadService) return;
+                lastHadService = hasService;
+                if (sensorLogger != null) {
+                    sensorLogger.logServiceState(hasService ? "IN_SERVICE" : "OUT_OF_SERVICE");
+                }
+                // Regaining service underground usually means a covered
+                // platform. Corroboration only — the engine still applies its
+                // own timing gate before advancing.
+                if (hasService && undergroundEngine != null) {
+                    undergroundEngine.corroborateArrival("service_regained");
+                }
+            }
+        };
+        try {
+            tm.listen(phoneStateListener,
+                    android.telephony.PhoneStateListener.LISTEN_SERVICE_STATE);
+        } catch (Exception ignored) {
+            phoneStateListener = null;
+        }
+    }
+
+    private void stopServiceStateWatch() {
+        if (phoneStateListener == null) return;
+        try {
+            android.telephony.TelephonyManager tm =
+                    (android.telephony.TelephonyManager) getSystemService(TELEPHONY_SERVICE);
+            if (tm != null) {
+                tm.listen(phoneStateListener,
+                        android.telephony.PhoneStateListener.LISTEN_NONE);
+            }
+        } catch (Exception ignored) {
+        } finally {
+            phoneStateListener = null;
+        }
+    }
+
+    // ── Belief-state checkpointing (survives OEM process kills) ────────────
+
+    private static final String PREF_BELIEF_INDEX      = "belief_index";
+    private static final String PREF_BELIEF_CONFIDENCE = "belief_confidence";
+    private static final String PREF_BELIEF_SINCE_MS   = "belief_since_ms";
+    private static final String PREF_BELIEF_WALL_MS    = "belief_wall_ms";
+    private static final String PREF_BELIEF_BOOT_MS    = "belief_boot_ms";
+
+    /**
+     * Checkpoints the engine's belief.
+     *
+     * <p>Stores a wall-clock/monotonic pair, not just one clock. On restore,
+     * {@code elapsedRealtime()} gives a gap immune to time-zone and clock
+     * changes — but it resets to zero on reboot, so a saved value larger than
+     * the current one is how a reboot is detected. Wall clock alone would be
+     * fooled by the user changing the time; monotonic alone cannot see a reboot.
+     */
+    private void saveBeliefState(int index, double confidence, long msSinceArrival) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putInt(PREF_BELIEF_INDEX, index)
+                .putFloat(PREF_BELIEF_CONFIDENCE, (float) confidence)
+                .putLong(PREF_BELIEF_SINCE_MS, msSinceArrival)
+                .putLong(PREF_BELIEF_WALL_MS, System.currentTimeMillis())
+                .putLong(PREF_BELIEF_BOOT_MS, SystemClock.elapsedRealtime())
+                .apply();
+    }
+
+    /**
+     * Restores a checkpoint, if one exists and is still meaningful.
+     *
+     * <p>A detected reboot invalidates the belief outright: the device was off
+     * for an unknown period and the journey is almost certainly over. Guessing
+     * would be worse than starting clean.
+     */
+    private void restoreBeliefStateIfAny() {
+        if (undergroundEngine == null) return;
+        SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        if (!p.contains(PREF_BELIEF_INDEX)) return;
+
+        int index        = p.getInt(PREF_BELIEF_INDEX, 0);
+        double conf      = p.getFloat(PREF_BELIEF_CONFIDENCE, 1.0f);
+        long sinceMs     = p.getLong(PREF_BELIEF_SINCE_MS, 0L);
+        long savedWall   = p.getLong(PREF_BELIEF_WALL_MS, 0L);
+        long savedBoot   = p.getLong(PREF_BELIEF_BOOT_MS, 0L);
+
+        long nowBoot = SystemClock.elapsedRealtime();
+        boolean rebooted = savedBoot > nowBoot;
+
+        if (rebooted) {
+            clearBeliefState();
+            if (sensorLogger != null) {
+                sensorLogger.logNote("belief discarded: reboot detected");
+            }
+            return;
+        }
+
+        long gapMs = nowBoot - savedBoot;
+        // Cross-check against the wall clock: if they disagree wildly the clock
+        // was changed, so trust the monotonic one.
+        long wallGap = System.currentTimeMillis() - savedWall;
+        if (wallGap > 0 && Math.abs(wallGap - gapMs) > 60_000L) {
+            if (sensorLogger != null) {
+                sensorLogger.logNote("clock skew: wallGap=" + wallGap
+                        + " monotonicGap=" + gapMs);
+            }
+        }
+
+        undergroundEngine.restoreState(index, conf, sinceMs + gapMs, gapMs);
+    }
+
+    private void clearBeliefState() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .remove(PREF_BELIEF_INDEX)
+                .remove(PREF_BELIEF_CONFIDENCE)
+                .remove(PREF_BELIEF_SINCE_MS)
+                .remove(PREF_BELIEF_WALL_MS)
+                .remove(PREF_BELIEF_BOOT_MS)
+                .apply();
+    }
+
+    private void stopUndergroundTracking() {
+        stopServiceStateWatch();
+        if (undergroundEngine != null) {
+            undergroundEngine.stop();
+            undergroundEngine = null;
+        }
+        if (sensorLogger != null) {
+            sensorLogger.close();
+            sensorLogger = null;
+        }
+        wifiPresence = null;
+        cellObserver = null;
+    }
+
+    /**
+     * Fires the alarm early, stating plainly that position could not be
+     * confirmed. Users tolerate an early alarm; they do not tolerate a confident
+     * alarm at the wrong station.
+     */
+    private void triggerLowConfidenceAlarm(String stopId, String stopName, String reason) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString("pending_alarm_reason", reason)
+                .apply();
+        triggerAlarm(stopId, "Approaching " + stopName, 0f);
     }
 
     // ── Notification helpers ───────────────────────────────────────────────
