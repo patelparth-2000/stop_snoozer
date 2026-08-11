@@ -1,10 +1,11 @@
-package com.example.stop_snoozer;
+package com.stopsnoozer.app;
 
 import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.os.Build;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -51,7 +52,34 @@ public class AlarmScheduler {
 
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am == null) return;
-        am.setAlarmClock(new AlarmManager.AlarmClockInfo(fireAt, showPi), trigger);
+        scheduleExactOrFallback(am, fireAt, showPi, trigger);
+    }
+
+    /**
+     * Registers the alarm, preferring setAlarmClock() for deep-Doze accuracy.
+     *
+     * On API 31+ setAlarmClock() requires exact-alarm permission. We declare
+     * USE_EXACT_ALARM (auto-granted on API 33+) and SCHEDULE_EXACT_ALARM
+     * (maxSdkVersion 32) — but on API 31–32 the user can revoke the latter in
+     * Settings, and setAlarmClock() then throws SecurityException. Because
+     * rescheduleAllFromPrefs() runs on boot, an unguarded throw there would
+     * abort the loop and silently kill every stored alarm.
+     *
+     * Fallback is setAndAllowWhileIdle(): still fires in Doze, but inexact.
+     */
+    private static void scheduleExactOrFallback(AlarmManager am, long fireAt,
+            PendingIntent showPi, PendingIntent trigger) {
+        boolean canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                || am.canScheduleExactAlarms();
+        if (canExact) {
+            try {
+                am.setAlarmClock(new AlarmManager.AlarmClockInfo(fireAt, showPi), trigger);
+                return;
+            } catch (SecurityException ignored) {
+                // Revoked between the check and the call — fall through to inexact.
+            }
+        }
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAt, trigger);
     }
 
     /** Cancel the pending AlarmManager intent and remove persisted data. */
@@ -91,11 +119,21 @@ public class AlarmScheduler {
     static void rescheduleAllFromPrefs(Context ctx) {
         SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String json = prefs.getString(KEY_ALARMS, "{}");
+
+        JSONObject all;
+        JSONArray  keys;
         try {
-            JSONObject all = new JSONObject(json);
-            JSONArray keys = all.names();
-            if (keys == null) return;
-            for (int i = 0; i < keys.length(); i++) {
+            all  = new JSONObject(json);
+            keys = all.names();
+        } catch (JSONException e) {
+            return;
+        }
+        if (keys == null) return;
+
+        for (int i = 0; i < keys.length(); i++) {
+            // Per-entry catch: one malformed record must not abort the loop,
+            // or a single bad alarm would silently cancel every later one on boot.
+            try {
                 String id = keys.getString(i);
                 JSONObject a = all.getJSONObject(id);
                 scheduleAndSave(ctx,
@@ -108,8 +146,8 @@ public class AlarmScheduler {
                         a.getString("weekdays"),
                         a.optString("specificDate", null),
                         a.optString("tripGroupId", null));
-            }
-        } catch (JSONException ignored) {}
+            } catch (JSONException ignored) {}
+        }
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────────

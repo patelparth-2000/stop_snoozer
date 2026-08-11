@@ -1,4 +1,4 @@
-package com.example.stop_snoozer;
+package com.stopsnoozer.app;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -16,6 +16,19 @@ public class CommuteAlarmReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         if (intent == null) return;
+
+        // ── "Test your alarm" self-test ────────────────────────────────────
+        // Reaching here proves the OS woke a backgrounded app on schedule —
+        // exactly the step OEM battery killers break. Record the proof and fire
+        // the alarm UI, but skip target tracking and rescheduling: there is no
+        // real stop and no recurrence.
+        if (intent.getBooleanExtra(AlarmSelfTest.EXTRA_SELF_TEST, false)) {
+            AlarmSelfTest.recordFired(context);
+            Intent test = new Intent(context, SnoozeTrackingService.class);
+            test.setAction(SnoozeTrackingService.ACTION_SELF_TEST_FIRE);
+            ContextCompat.startForegroundService(context, test);
+            return;
+        }
 
         String alarmId      = intent.getStringExtra("alarmId");
         String stopId       = intent.getStringExtra("stopId");
