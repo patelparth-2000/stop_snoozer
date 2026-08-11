@@ -17,6 +17,7 @@ import '../../presentation/system_health/system_health_screen.dart';
 import '../../presentation/system_health/system_health_viewmodel.dart';
 import '../../presentation/calendar/calendar_screen.dart';
 import '../../presentation/calendar/calendar_viewmodel.dart';
+import '../../presentation/route_select/route_select_screen.dart';
 import '../shell/app_shell.dart';
 
 // Long-lived Cubits shared across the entire shell
@@ -72,6 +73,25 @@ final appRouter = GoRouter(
             ),
             child: const AlarmScreen(),
           ),
+        );
+      },
+    ),
+
+    // ── Underground route pre-selection (U4) ──────────────────────────────
+    // Full-screen rather than a shell tab: it is a modal decision the user must
+    // finish before an underground journey can be tracked at all.
+    GoRoute(
+      path: '/route-select',
+      pageBuilder: (context, state) {
+        final extra = state.extra as Map<String, dynamic>?;
+        final origin = extra?['origin'] as StopPoint?;
+        final destination = extra?['destination'] as StopPoint?;
+        if (origin == null || destination == null) {
+          return _fade(state, const _RouteSelectMisuse());
+        }
+        return _fade(
+          state,
+          RouteSelectScreen(origin: origin, destination: destination),
         );
       },
     ),
@@ -163,6 +183,28 @@ CustomTransitionPage<void> _fade(GoRouterState state, Widget child) =>
       ),
       transitionDuration: const Duration(milliseconds: 200),
     );
+
+/// Shown when /route-select is reached without both endpoints.
+///
+/// There is no sensible fallback stop here: guessing a route would be worse
+/// than saying nothing, because the whole point of pre-selection is that the
+/// sequence is known exactly.
+class _RouteSelectMisuse extends StatelessWidget {
+  const _RouteSelectMisuse();
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text(
+              'Pick a start and destination first.',
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      );
+}
 
 StopPoint _fallbackStop() => const StopPoint(
       id: 'DEEP_LINK',

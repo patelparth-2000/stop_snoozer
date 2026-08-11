@@ -22,6 +22,47 @@ abstract final class StringConstants {
   static const String splashPermContinue      = 'Grant Permissions & Continue';
   static const String splashPermSkip          = 'Skip for now';
 
+  // Prominent disclosure — background location.
+  //
+  // Play policy requires this to appear IN-APP, in the runtime flow, immediately
+  // BEFORE the OS background-location prompt, and to require affirmative action.
+  // The first sentence of [discloseBgBody] deliberately follows Google's
+  // prescribed form ("collects location data to enable … even when the app is
+  // closed or not in use") — the most common rejection is a paraphrase, or a
+  // permission requested before this dialog is accepted. Do not reword it
+  // without re-reading the Location permissions policy.
+  static const String discloseBgTitle   = 'Location while the app is closed';
+  static const String discloseBgBody    =
+      'StopSnoozer collects location data to detect when you reach your '
+      'destination stop and wake you with an alarm, even when the app is closed '
+      'or not in use.\n\n'
+      'On the Underground there is no GPS signal, so the app uses your phone\'s '
+      'motion and pressure sensors to track your position offline. Location is '
+      'used to confirm that position wherever signal is available.';
+  static const String discloseBgFooter  =
+      'Location is used only to fire your alarm. It is never sold, and never '
+      'leaves your phone except in requests to Transport for London that contain '
+      'no personal data.';
+  static const String discloseBgAllow   = 'Allow';
+  static const String discloseBgDeny    = 'No thanks';
+  static const String discloseBgDenied  =
+      'Without background location, alarms can only fire while StopSnoozer is '
+      'open and on screen. You can change this later in Settings.';
+
+  // Radio-scan consent (PECR reg. 6 — see RadioConsentDialog).
+  static const String consentRadioTitle = 'Help StopSnoozer learn your stations';
+  static const String consentRadioBody  =
+      'StopSnoozer can read the identifiers of nearby Wi-Fi access points and '
+      'mobile cells to recognise which underground station you are at.\n\n'
+      'This reading happens on your device only. The identifiers are stored in '
+      'the app\'s private database, are never transmitted anywhere, and you can '
+      'erase them at any time from System Health.';
+  static const String consentRadioFooter =
+      'This is optional. Arrival detection works without it, using the pressure '
+      'and motion sensors and journey timing.';
+  static const String consentRadioAllow = 'Allow on-device learning';
+  static const String consentRadioDeny  = 'Not now';
+
   // Dashboard
   static const String dashboardGreetingMorning   = 'Good morning, Commuter';
   static const String dashboardGreetingAfternoon = 'Good afternoon, Commuter';
