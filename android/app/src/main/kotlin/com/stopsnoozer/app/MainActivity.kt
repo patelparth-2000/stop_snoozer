@@ -1,4 +1,4 @@
-package com.example.stop_snoozer
+package com.stopsnoozer.app
 
 import android.app.Activity
 import android.app.NotificationManager
@@ -313,6 +313,86 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    // ── U5–U9: underground sensor-fusion tracking ─────────────
+                    "startUndergroundTracking" -> {
+                        val plan = call.argument<String>("journeyPlan")
+                        if (plan.isNullOrEmpty()) {
+                            result.error("MISSING", "journeyPlan required", null)
+                        } else {
+                            val intent = Intent(this, SnoozeTrackingService::class.java).also {
+                                it.action = SnoozeTrackingService.ACTION_START_UNDERGROUND
+                                it.putExtra(SnoozeTrackingService.EXTRA_JOURNEY_PLAN, plan)
+                                it.putExtra(
+                                    SnoozeTrackingService.EXTRA_ENABLE_LOGGING,
+                                    call.argument<Boolean>("enableSensorLogging") ?: false
+                                )
+                            }
+                            ContextCompat.startForegroundService(this, intent)
+                            result.success(null)
+                        }
+                    }
+
+                    // Reports whether this device can run the underground engine.
+                    "getUndergroundCapability" -> {
+                        val sm = getSystemService(SENSOR_SERVICE)
+                                as android.hardware.SensorManager
+                        result.success(mapOf(
+                            "hasBarometer" to (sm.getDefaultSensor(
+                                android.hardware.Sensor.TYPE_PRESSURE) != null),
+                            "hasAccelerometer" to (sm.getDefaultSensor(
+                                android.hardware.Sensor.TYPE_ACCELEROMETER) != null)
+                        ))
+                    }
+
+                    // Field-test ground-truth marker: "I am arriving right now".
+                    // The sensor logs are unscoreable without these, so this is
+                    // what makes threshold calibration possible at all.
+                    "markGroundTruth" -> {
+                        val intent = Intent(this, SnoozeTrackingService::class.java).also {
+                            it.action = SnoozeTrackingService.ACTION_GROUND_TRUTH
+                            it.putExtra(
+                                SnoozeTrackingService.EXTRA_GROUND_TRUTH_LABEL,
+                                call.argument<String>("label") ?: "arrival"
+                            )
+                        }
+                        startService(intent)
+                        result.success(null)
+                    }
+
+                    // Directory holding field-test CSVs, for the UI to surface.
+                    "getSensorLogDir" -> {
+                        result.success(java.io.File(
+                            getExternalFilesDir(null), "sensor_logs").absolutePath)
+                    }
+
+                    // ── A9: OEM-specific background restriction settings ──────
+                    "getOemBatteryInfo" -> {
+                        result.success(mapOf(
+                            "manufacturer" to (Build.MANUFACTURER ?: ""),
+                            "oemName"      to OemBatteryHelper.oemName(),
+                            "available"    to OemBatteryHelper.hasOemSettings(this)
+                        ))
+                    }
+
+                    "openOemBatterySettings" -> {
+                        result.success(OemBatteryHelper.openOemSettings(this))
+                    }
+
+                    // ── A10: "Test your alarm" ────────────────────────────────
+                    "getAlarmDiagnostics" -> {
+                        result.success(AlarmSelfTest.diagnostics(this))
+                    }
+
+                    "runAlarmSelfTest" -> {
+                        val delay = call.argument<Int>("delaySeconds") ?: 10
+                        result.success(AlarmSelfTest.schedule(this, delay))
+                    }
+
+                    "cancelAlarmSelfTest" -> {
+                        AlarmSelfTest.cancel(this)
+                        result.success(null)
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -362,11 +442,11 @@ class MainActivity : FlutterActivity() {
 
     private fun switchLauncherIcon(themeIndex: Int) {
         val aliases = listOf(
-            "com.example.stop_snoozer.MainActivityAlias_Amber",
-            "com.example.stop_snoozer.MainActivityAlias_Navy",
-            "com.example.stop_snoozer.MainActivityAlias_Forest",
-            "com.example.stop_snoozer.MainActivityAlias_Volcanic",
-            "com.example.stop_snoozer.MainActivityAlias_Galactic"
+            "com.stopsnoozer.app.MainActivityAlias_Amber",
+            "com.stopsnoozer.app.MainActivityAlias_Navy",
+            "com.stopsnoozer.app.MainActivityAlias_Forest",
+            "com.stopsnoozer.app.MainActivityAlias_Volcanic",
+            "com.stopsnoozer.app.MainActivityAlias_Galactic"
         )
         val pm = packageManager
         aliases.forEachIndexed { i, alias ->

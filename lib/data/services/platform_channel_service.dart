@@ -1,4 +1,74 @@
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
+
+/// Everything that determines whether an alarm will actually fire on this
+/// device. Produced by AlarmSelfTest.diagnostics() on the native side.
+class AlarmDiagnostics {
+  const AlarmDiagnostics({
+    required this.canScheduleExactAlarms,
+    required this.batteryOptimizationExempt,
+    required this.notificationsEnabled,
+    required this.canUseFullScreenIntent,
+    required this.manufacturer,
+    required this.androidSdk,
+    required this.oemName,
+    required this.oemSettingsAvailable,
+    required this.lastTestScheduledAt,
+    required this.lastTestFiredAt,
+  });
+
+  final bool canScheduleExactAlarms;
+  final bool batteryOptimizationExempt;
+  final bool notificationsEnabled;
+  final bool canUseFullScreenIntent;
+  final String manufacturer;
+  final int androidSdk;
+
+  /// Non-null when this manufacturer is known to run an extra background killer.
+  final String? oemName;
+  final bool oemSettingsAvailable;
+
+  final int lastTestScheduledAt;
+  final int lastTestFiredAt;
+
+  /// True when nothing is known to block alarms.
+  bool get allClear =>
+      canScheduleExactAlarms &&
+      batteryOptimizationExempt &&
+      notificationsEnabled;
+
+  /// True when a self-test was started and the alarm actually fired afterwards.
+  bool get lastTestPassed =>
+      lastTestScheduledAt > 0 && lastTestFiredAt >= lastTestScheduledAt;
+
+  static const empty = AlarmDiagnostics(
+    canScheduleExactAlarms: true,
+    batteryOptimizationExempt: false,
+    notificationsEnabled: true,
+    canUseFullScreenIntent: true,
+    manufacturer: '',
+    androidSdk: 0,
+    oemName: null,
+    oemSettingsAvailable: false,
+    lastTestScheduledAt: 0,
+    lastTestFiredAt: 0,
+  );
+
+  factory AlarmDiagnostics.fromJson(Map<String, dynamic> j) => AlarmDiagnostics(
+        canScheduleExactAlarms: j['canScheduleExactAlarms'] as bool? ?? true,
+        batteryOptimizationExempt:
+            j['batteryOptimizationExempt'] as bool? ?? false,
+        notificationsEnabled: j['notificationsEnabled'] as bool? ?? true,
+        canUseFullScreenIntent: j['canUseFullScreenIntent'] as bool? ?? true,
+        manufacturer: j['manufacturer'] as String? ?? '',
+        androidSdk: j['androidSdk'] as int? ?? 0,
+        oemName: j['oemName'] as String?,
+        oemSettingsAvailable: j['oemSettingsAvailable'] as bool? ?? false,
+        lastTestScheduledAt: (j['lastTestScheduledAt'] as num?)?.toInt() ?? 0,
+        lastTestFiredAt: (j['lastTestFiredAt'] as num?)?.toInt() ?? 0,
+      );
+}
 
 class PlatformChannelService {
   PlatformChannelService._();
@@ -230,6 +300,133 @@ class PlatformChannelService {
     } on PlatformException catch (_) {
       return null;
     }
+  }
+
+  // ── U5–U9: underground sensor-fusion tracking ───────────────────────────
+
+  /// Hands a resolved journey plan to the native fusion engine.
+  ///
+  /// [journeyPlan] must be the output of `RouteTopologyRepository.encodePlan`.
+  /// Set [enableSensorLogging] only for field-test runs — it writes a CSV per
+  /// journey to external storage.
+  Future<void> startUndergroundTracking({
+    required String journeyPlan,
+    bool enableSensorLogging = false,
+  }) async {
+    try {
+      await _method.invokeMethod<void>('startUndergroundTracking', {
+        'journeyPlan': journeyPlan,
+        'enableSensorLogging': enableSensorLogging,
+      });
+    } on PlatformException catch (_) {}
+  }
+
+  /// Whether this device has the sensors the underground engine needs.
+  ///
+  /// A missing barometer is not fatal but materially degrades accuracy, so the
+  /// UI should say so rather than promising underground tracking it cannot
+  /// deliver.
+  Future<({bool hasBarometer, bool hasAccelerometer})>
+      getUndergroundCapability() async {
+    try {
+      final r = await _method
+          .invokeMapMethod<String, dynamic>('getUndergroundCapability');
+      return (
+        hasBarometer: r?['hasBarometer'] as bool? ?? false,
+        hasAccelerometer: r?['hasAccelerometer'] as bool? ?? false,
+      );
+    } on PlatformException catch (_) {
+      return (hasBarometer: false, hasAccelerometer: false);
+    }
+  }
+
+  /// Records a field-test ground-truth marker: "I am arriving right now".
+  ///
+  /// Sensor logs cannot be scored without these — a trace with no reference
+  /// points cannot tell a correct detection from a lucky one, which is why
+  /// calibration depends on this being used during the ride.
+  Future<void> markGroundTruth({String label = 'arrival'}) async {
+    try {
+      await _method.invokeMethod<void>('markGroundTruth', {'label': label});
+    } on PlatformException catch (_) {}
+  }
+
+  /// Directory holding field-test sensor CSVs.
+  Future<String?> getSensorLogDir() async {
+    try {
+      return await _method.invokeMethod<String>('getSensorLogDir');
+    } on PlatformException catch (_) {
+      return null;
+    }
+  }
+
+  // ── A9: OEM background-restriction settings ─────────────────────────────
+
+  /// Returns `(oemName, settingsAvailable)` for this device.
+  ///
+  /// `oemName` is null on manufacturers with no known extra background killer —
+  /// the UI hides the whole card in that case rather than sending users hunting
+  /// for a screen their phone does not have.
+  Future<({String? oemName, bool available, String manufacturer})>
+      getOemBatteryInfo() async {
+    try {
+      final r = await _method.invokeMapMethod<String, dynamic>('getOemBatteryInfo');
+      return (
+        oemName: r?['oemName'] as String?,
+        available: r?['available'] as bool? ?? false,
+        manufacturer: r?['manufacturer'] as String? ?? '',
+      );
+    } on PlatformException catch (_) {
+      return (oemName: null, available: false, manufacturer: '');
+    }
+  }
+
+  /// Opens the manufacturer's auto-start / protected-app screen.
+  /// Returns false when no such Activity resolved.
+  Future<bool> openOemBatterySettings() async {
+    try {
+      return await _method.invokeMethod<bool>('openOemBatterySettings') ?? false;
+    } on PlatformException catch (_) {
+      return false;
+    }
+  }
+
+  // ── A10: "Test your alarm" ──────────────────────────────────────────────
+
+  Future<AlarmDiagnostics> getAlarmDiagnostics() async {
+    try {
+      final raw = await _method.invokeMethod<String>('getAlarmDiagnostics');
+      if (raw == null || raw.isEmpty) return AlarmDiagnostics.empty;
+      return AlarmDiagnostics.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+    } on PlatformException catch (_) {
+      return AlarmDiagnostics.empty;
+    } on FormatException catch (_) {
+      return AlarmDiagnostics.empty;
+    }
+  }
+
+  /// Schedules a real alarm [delaySeconds] out, through the same
+  /// AlarmManager → BroadcastReceiver → foreground-service path a commute alarm
+  /// uses. Returns false if it could only be scheduled *inexactly*, in which
+  /// case it may fire late and the UI must say so.
+  Future<bool> runAlarmSelfTest({int delaySeconds = 10}) async {
+    try {
+      return await _method.invokeMethod<bool>(
+            'runAlarmSelfTest',
+            {'delaySeconds': delaySeconds},
+          ) ??
+          false;
+    } on PlatformException catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> cancelAlarmSelfTest() async {
+    try {
+      await _method.invokeMethod<void>('cancelAlarmSelfTest');
+    } on PlatformException catch (_) {}
   }
 
   Future<void> switchLauncherIcon(int index) async {
