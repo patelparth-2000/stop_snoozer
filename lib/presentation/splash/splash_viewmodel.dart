@@ -15,6 +15,7 @@ class SplashState extends Equatable {
     this.notifGranted = false,
     this.batteryGranted = false,
     this.fullScreenIntentGranted = true,
+    this.bgDisclosureDeclined = false,
   });
 
   final SplashPhase phase;
@@ -24,6 +25,11 @@ class SplashState extends Equatable {
   final bool batteryGranted;
   final bool fullScreenIntentGranted;
 
+  /// True when the user was shown the background-location disclosure and
+  /// declined it, as distinct from never having been asked. Drives the
+  /// explainer in the permission sheet.
+  final bool bgDisclosureDeclined;
+
   SplashState copyWith({
     SplashPhase? phase,
     bool? locationGranted,
@@ -31,6 +37,7 @@ class SplashState extends Equatable {
     bool? notifGranted,
     bool? batteryGranted,
     bool? fullScreenIntentGranted,
+    bool? bgDisclosureDeclined,
   }) =>
       SplashState(
         phase:                   phase                   ?? this.phase,
@@ -39,6 +46,7 @@ class SplashState extends Equatable {
         notifGranted:            notifGranted            ?? this.notifGranted,
         batteryGranted:          batteryGranted          ?? this.batteryGranted,
         fullScreenIntentGranted: fullScreenIntentGranted ?? this.fullScreenIntentGranted,
+        bgDisclosureDeclined:    bgDisclosureDeclined    ?? this.bgDisclosureDeclined,
       );
 
   @override
@@ -49,6 +57,7 @@ class SplashState extends Equatable {
         notifGranted,
         batteryGranted,
         fullScreenIntentGranted,
+        bgDisclosureDeclined,
       ];
 }
 
@@ -81,13 +90,28 @@ class SplashCubit extends Cubit<SplashState> {
     }
   }
 
-  Future<void> requestPermissions() async {
+  /// Runs the permission sequence.
+  ///
+  /// [onDiscloseBackgroundLocation] must present the prominent disclosure and
+  /// resolve `true` only on an affirmative tap. It is a parameter rather than
+  /// something the cubit owns because the ordering is a Play requirement, not a
+  /// UI detail: the background-location request below is unreachable unless the
+  /// disclosure returned `true`, so no future edit to the screen can accidentally
+  /// prompt first. See [ProminentDisclosureDialog].
+  Future<void> requestPermissions({
+    required Future<bool> Function() onDiscloseBackgroundLocation,
+  }) async {
     final locWhenInUse = await Permission.locationWhenInUse.request();
 
     bool locAlways = await Permission.locationAlways.isGranted;
+    bool bgDisclosureDeclined = false;
     if (locWhenInUse.isGranted && !locAlways) {
-      await Permission.locationAlways.request();
-      locAlways = await Permission.locationAlways.isGranted;
+      if (await onDiscloseBackgroundLocation()) {
+        await Permission.locationAlways.request();
+        locAlways = await Permission.locationAlways.isGranted;
+      } else {
+        bgDisclosureDeclined = true;
+      }
     }
 
     final notif = (await Permission.notification.request()).isGranted;
@@ -105,6 +129,7 @@ class SplashCubit extends Cubit<SplashState> {
       notifGranted:            notif,
       batteryGranted:          bat,
       fullScreenIntentGranted: fullScreen,
+      bgDisclosureDeclined:    bgDisclosureDeclined,
     ));
 
     if ((locWhenInUse.isGranted || locAlways) && notif) {

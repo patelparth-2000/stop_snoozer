@@ -15,6 +15,7 @@ class SplashPermissionSheet extends StatelessWidget {
     required this.fullScreenIntentGranted,
     required this.onRequestPermissions,
     required this.onSkip,
+    this.bgDisclosureDeclined = false,
   });
 
   final bool locationGranted;
@@ -22,6 +23,7 @@ class SplashPermissionSheet extends StatelessWidget {
   final bool notificationGranted;
   final bool batteryGranted;
   final bool fullScreenIntentGranted;
+  final bool bgDisclosureDeclined;
   final VoidCallback onRequestPermissions;
   final VoidCallback onSkip;
 
@@ -111,6 +113,24 @@ class SplashPermissionSheet extends StatelessWidget {
               description: StringConstants.splashPermFullScreenDesc,
               granted: fullScreenIntentGranted,
             ),
+            if (bgDisclosureDeclined) ...[
+              const SizedBox(height: AppConstants.spaceMd),
+              Container(
+                padding: const EdgeInsets.all(AppConstants.spaceMd),
+                decoration: BoxDecoration(
+                  color: ColorConstants.surfaceElevated,
+                  borderRadius: BorderRadius.circular(AppConstants.radiusSm),
+                ),
+                child: Text(
+                  StringConstants.discloseBgDenied,
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    color: ColorConstants.textSecondary,
+                    height: 1.5,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: AppConstants.spaceXl),
             SnoozerButton(
               label: StringConstants.splashPermContinue,

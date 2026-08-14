@@ -3,12 +3,16 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'system_health_viewmodel.dart';
 import 'components/sensor_status_card.dart';
-import 'components/permission_toggle_row.dart';
+import 'components/alarm_self_test_card.dart';
+import 'components/attribution_card.dart';
+import 'components/learned_data_card.dart';
+import 'components/oem_battery_card.dart';
 import '../../core/constants/color_constants.dart';
 import '../../core/theme/theme_scope.dart';
 import '../../core/constants/string_constants.dart';
 import '../../core/constants/app_constants.dart';
 import '../../data/services/platform_channel_service.dart';
+import '../../data/services/stop_points_db.dart';
 import '../shared/widgets/snoozer_button.dart';
 
 class SystemHealthScreen extends StatelessWidget {
@@ -80,10 +84,6 @@ class _SettingsContent extends StatefulWidget {
 
 class _SettingsContentState extends State<_SettingsContent>
     with WidgetsBindingObserver {
-  bool _verifying = false;
-  bool _verified  = _hasVerifiedOnce;
-  static bool _hasVerifiedOnce = false;
-
   @override
   void initState() {
     super.initState();
@@ -103,15 +103,6 @@ class _SettingsContentState extends State<_SettingsContent>
   void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
     if (lifecycleState == AppLifecycleState.resumed && mounted) {
       context.read<SystemHealthCubit>().init();
-    }
-  }
-
-  Future<void> _verify() async {
-    setState(() { _verifying = true; });
-    await Future<void>.delayed(const Duration(milliseconds: 1200));
-    if (mounted) {
-      _hasVerifiedOnce = true;
-      setState(() { _verifying = false; _verified = true; });
     }
   }
 
@@ -181,13 +172,31 @@ class _SettingsContentState extends State<_SettingsContent>
         ),
         const SizedBox(height: AppConstants.spaceSm),
 
-        // Do Not Disturb bypass toggle
-        PermissionToggleRow(
-          label: StringConstants.healthDndTitle,
-          description: StringConstants.healthDndDesc,
-          value: state.dndBypassEnabled,
-          onToggle: (_) => cubit.toggleDndBypass(),
-        ),
+        // A9 — manufacturer killer, shown only where one is known to exist
+        OemBatteryCard(state: state),
+        if (state.oemName != null && state.oemSettingsAvailable)
+          const SizedBox(height: AppConstants.spaceSm),
+
+        // NOTE: the former "DND bypass" toggle was removed, not fixed.
+        //
+        // It only flipped local state — no notification-policy access was ever
+        // requested — so it advertised a guarantee the app did not have. That is
+        // the worst class of bug in an alarm app: a promise relied on while
+        // asleep.
+        //
+        // It is also unnecessary. The alarm is played with
+        // AudioAttributes.USAGE_ALARM, and Android's default Do Not Disturb
+        // configuration permits alarms through. Combined with the full-screen
+        // intent, the user is woken without needing ACCESS_NOTIFICATION_POLICY
+        // at all. Only the *visual* notification would need channel DND bypass,
+        // which is not worth a sensitive permission and a consent flow.
+        const _DndInfoCard(),
+        const SizedBox(height: AppConstants.spaceLg),
+
+        // ── A10 — will an alarm actually fire here? ─────────────────────
+        _SectionLabel('Alarm Delivery Verification'),
+        const SizedBox(height: AppConstants.spaceSm),
+        AlarmSelfTestCard(state: state),
         const SizedBox(height: AppConstants.spaceLg),
 
         // ── Hardware Sensor Diagnostics ─────────────────────────────────
@@ -229,49 +238,31 @@ class _SettingsContentState extends State<_SettingsContent>
         _SectionLabel('Offline Storage Status'),
         const SizedBox(height: AppConstants.spaceSm),
 
-        Container(
-          padding: const EdgeInsets.all(AppConstants.spaceMd),
-          decoration: BoxDecoration(
-            color: ColorConstants.surfaceSecondary,
-            borderRadius: BorderRadius.circular(AppConstants.radiusLg),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _StorageRow(label: 'Active Database', value: 'uk.db'),
-              const SizedBox(height: AppConstants.spaceXs),
-              _StorageRow(label: 'Compressed Size', value: '16.5 MB'),
-              const SizedBox(height: AppConstants.spaceXs),
-              _StorageRow(label: 'Indexed Access Points', value: '353,363 nodes'),
-              const SizedBox(height: AppConstants.spaceXs),
-              _StorageRow(label: 'Page Size', value: '16,384 B (16 KB)'),
-              const SizedBox(height: AppConstants.spaceMd),
-              if (_verified)
-                Row(
-                  children: [
-                    const Icon(Icons.check_circle_rounded,
-                        color: Color(0xFF10B981), size: 16),
-                    const SizedBox(width: 6),
-                    Text(
-                      '16 KB page-size alignment verified',
-                      style: GoogleFonts.inter(
-                        fontSize: 12,
-                        color: const Color(0xFF10B981),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                )
-              else
-                SnoozerButton(
-                  label: 'Verify 16 KB Page Size Alignment Compliance',
-                  isLoading: _verifying,
-                  onTap: _verify,
-                  variant: SnoozerButtonVariant.secondary,
-                ),
-            ],
-          ),
-        ),
+        // Real values queried from the database.
+        //
+        // These were previously hardcoded strings ('16.5 MB', '353,363 nodes'),
+        // which would have gone stale the moment the asset was regenerated.
+        //
+        // The old "Verify 16 KB Page Size Alignment" button is also gone: it
+        // waited 1.2 s and then unconditionally reported success, checking
+        // nothing. Alignment is a property of the *built artifact*, not the
+        // running device, so a runtime check is meaningless by construction. It
+        // now lives in tools/check_16kb_alignment.sh for the release pipeline.
+        const _StorageStatsCard(),
+        const SizedBox(height: AppConstants.spaceLg),
+
+        // ── Privacy controls ────────────────────────────────────────────
+        // Consent given at first journey setup is revocable here, and
+        // revoking erases what was learned under it.
+        _SectionLabel('Privacy & Learned Data'),
+        const SizedBox(height: AppConstants.spaceSm),
+        const LearnedDataCard(),
+        const SizedBox(height: AppConstants.spaceLg),
+
+        // ── A12 — data attribution (OGL v3.0 / TfL: legally required) ────
+        _SectionLabel('Data Sources & Licences'),
+        const SizedBox(height: AppConstants.spaceSm),
+        const AttributionCard(),
         const SizedBox(height: AppConstants.spaceLg),
       ],
     );
@@ -279,6 +270,195 @@ class _SettingsContentState extends State<_SettingsContent>
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/// Live database statistics, queried rather than hardcoded.
+///
+/// Also surfaces whether route topology is present at all — without it
+/// underground tracking silently degrades to GPS, which is otherwise invisible
+/// to the user.
+class _StorageStatsCard extends StatefulWidget {
+  const _StorageStatsCard();
+
+  @override
+  State<_StorageStatsCard> createState() => _StorageStatsCardState();
+}
+
+class _StorageStatsCardState extends State<_StorageStatsCard> {
+  DbStats? _stats;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final s = await StopPointsDb.instance.stats();
+    if (mounted) setState(() => _stats = s);
+  }
+
+  static String _fmtInt(int n) {
+    final s = n.toString();
+    final buf = StringBuffer();
+    for (var i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) buf.write(',');
+      buf.write(s[i]);
+    }
+    return buf.toString();
+  }
+
+  static String _fmtBytes(int b) => b <= 0
+      ? '—'
+      : b >= 1000000
+          ? '${(b / 1000000).toStringAsFixed(1)} MB'
+          : '${(b / 1000).toStringAsFixed(0)} kB';
+
+  @override
+  Widget build(BuildContext context) {
+    final s = _stats;
+    return Container(
+      padding: const EdgeInsets.all(AppConstants.spaceMd),
+      decoration: BoxDecoration(
+        color: ColorConstants.surfaceSecondary,
+        borderRadius: BorderRadius.circular(AppConstants.radiusLg),
+      ),
+      child: s == null
+          ? SizedBox(
+              height: 40,
+              child: Center(
+                child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: ColorConstants.primary),
+                ),
+              ),
+            )
+          : !s.available
+              ? Text(
+                  'Database not yet initialised.',
+                  style: GoogleFonts.inter(
+                      fontSize: 12, color: ColorConstants.textSecondary),
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _StorageRow(
+                        label: 'Stops indexed',
+                        value: _fmtInt(s.stopCount)),
+                    const SizedBox(height: AppConstants.spaceXs),
+                    _StorageRow(
+                        label: 'Database size',
+                        value: _fmtBytes(s.fileSizeBytes)),
+                    const SizedBox(height: AppConstants.spaceXs),
+                    _StorageRow(
+                        label: 'Page size',
+                        value: '${_fmtInt(s.pageSizeBytes)} B'),
+                    const SizedBox(height: AppConstants.spaceXs),
+                    _StorageRow(
+                        label: 'Schema version',
+                        value: 'v${s.schemaVersion}'),
+                    const SizedBox(height: AppConstants.spaceXs),
+                    _StorageRow(
+                        label: 'Fast search index',
+                        value: s.hasFtsIndex ? 'FTS5 active' : 'not built'),
+                    const SizedBox(height: AppConstants.spaceSm),
+                    const Divider(color: Color(0xFF1E293B), height: 1),
+                    const SizedBox(height: AppConstants.spaceSm),
+                    _StorageRow(
+                        label: 'Route sequences',
+                        value: s.hasTopology
+                            ? _fmtInt(s.routeSequenceCount)
+                            : 'none'),
+                    const SizedBox(height: AppConstants.spaceXs),
+                    _StorageRow(
+                        label: 'Inter-station times',
+                        value: _fmtInt(s.runTimeCount)),
+                    const SizedBox(height: AppConstants.spaceXs),
+                    _StorageRow(
+                        label: 'Platform depths',
+                        value: _fmtInt(s.stationDepthCount)),
+                    if (!s.hasTopology) ...[
+                      const SizedBox(height: AppConstants.spaceSm),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.info_outline_rounded,
+                              size: 14, color: ColorConstants.textSecondary),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'No Underground route map installed — stop-by-stop '
+                              'tracking is unavailable. GPS alarms work normally.',
+                              style: GoogleFonts.inter(
+                                fontSize: 11,
+                                color: ColorConstants.textSecondary,
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+    );
+  }
+}
+
+/// States plainly how the alarm behaves under Do Not Disturb.
+///
+/// Replaces a toggle that did nothing. Informational rather than interactive
+/// because there is genuinely nothing for the user to configure: alarm-attributed
+/// audio already plays through DND by default.
+class _DndInfoCard extends StatelessWidget {
+  const _DndInfoCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(AppConstants.spaceMd),
+      decoration: BoxDecoration(
+        color: ColorConstants.surfaceSecondary,
+        borderRadius: BorderRadius.circular(AppConstants.radiusLg),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.do_not_disturb_on_outlined,
+              size: 18, color: ColorConstants.success),
+          const SizedBox(width: AppConstants.spaceSm),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Works with Do Not Disturb',
+                  style: GoogleFonts.sora(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: ColorConstants.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Your stop alarm plays as an alarm, so Android lets it '
+                  'through Do Not Disturb without any extra permission — the '
+                  'same way your clock alarm does. Nothing to configure.',
+                  style: GoogleFonts.inter(
+                    fontSize: 11,
+                    color: ColorConstants.textSecondary,
+                    height: 1.45,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.text);

@@ -5,6 +5,7 @@ import 'splash_viewmodel.dart';
 import 'components/splash_logo_widget.dart';
 import 'components/splash_progress_bar.dart';
 import 'components/splash_permission_sheet.dart';
+import '../shared/widgets/prominent_disclosure_dialog.dart';
 import '../../core/constants/color_constants.dart';
 import '../../data/blocs/database_init_handler.dart';
 
@@ -64,8 +65,16 @@ class SplashScreen extends StatelessWidget {
                   notificationGranted: splashState.notifGranted,
                   batteryGranted: splashState.batteryGranted,
                   fullScreenIntentGranted: splashState.fullScreenIntentGranted,
+                  bgDisclosureDeclined: splashState.bgDisclosureDeclined,
                   onRequestPermissions: () =>
-                      context.read<SplashCubit>().requestPermissions(),
+                      context.read<SplashCubit>().requestPermissions(
+                            // The disclosure is shown from here, immediately
+                            // before the OS background-location prompt, which
+                            // is where Play requires it to appear.
+                            onDiscloseBackgroundLocation: () =>
+                                ProminentDisclosureDialog
+                                    .showBackgroundLocation(context),
+                          ),
                   onSkip: () => context.read<SplashCubit>().skipPermissions(),
                 ),
             ],
