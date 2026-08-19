@@ -37,3 +37,11 @@ flutter:
     - assets/images/
     - assets/data/
     - assets/uk.db.gz
+    # Bundled Inter + Sora so google_fonts NEVER reaches fonts.gstatic.com.
+    # This app is offline-first and is used underground; downloading a font on
+    # first launch is exactly the wrong dependency. Runtime fetching is also
+    # disabled in main.dart - both halves are needed.
+    # Generated as static instances from the upstream variable fonts (Google
+    # publishes no static weights any more). OFL licences ship alongside, as
+    # the SIL Open Font License requires.
+    - assets/google_fonts/
