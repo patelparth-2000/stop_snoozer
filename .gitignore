@@ -62,3 +62,7 @@ _tfl_runtimes.xlsx
 /android/key.properties
 *.jks
 *.keystore
+# AI agent tooling — local only, never pushed.
+# Agents, skills, commands and settings used to work on this repo. They are
+# workspace tooling, not part of the product, and they are rebuildable.
+.claude/
