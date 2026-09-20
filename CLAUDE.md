@@ -176,7 +176,37 @@ If you are reading this, they are addressed to you.
 Authored in the workspace `STANDARDS.md` and generated into this file. Do not edit the block —
 edit the master and re-run `python .claude/sync-standards.py`.
 
-|---|
+## 1. A structure that fits the project
+
+Two halves, and the second is the one that applies most days.
+
+### Starting something new — design it first
+
+New project, new platform folder (`web/`, `api/`, `desktop/`), or a subsystem big enough to have its
+own schema or endpoints: act as a senior full-stack engineer building a production-ready MVP from
+the ground up. Design the complete system architecture, **then build the simplest scalable version
+possible** — system architecture · file structure · database schema · API endpoints · UI
+architecture · production-ready code. Nothing gets written until those exist in the project's
+`CLAUDE.md` or on its board.
+
+"Simplest scalable" is the whole instruction: **simplest** rules out the speculative layer nobody
+needs yet; **scalable** rules out the shortcut that must be torn out at 10x. When they pull against
+each other, standard 4 decides — would it *stop working*, or just get slower?
+
+### MVP is about scope, not structure or quality
+
+**Minimum Viable Product = the smallest version that a real person can actually use.** Not a demo,
+not a throwaway — a real, usable first release with the core path working end to end. Everything
+else waits.
+
+It says nothing about code quality. A good MVP still has clean architecture, real security, tests
+and a proper schema. **"Minimum" applies to the feature list, never to the engineering.** Cutting
+quality to ship faster is not an MVP; it is debt with a nicer name.
+
+For money_kind, the difference looks like this:
+
+| MVP | Post-MVP |
+|---|---|
 | log in → create group → add expense → split it → see who owes whom | receipt scanning, AI analysis, multi-currency, analytics, notifications, offline sync, payment integration, recommendations |
 
 The reason is not engineering, it is **information**: you cannot learn whether people want the thing
