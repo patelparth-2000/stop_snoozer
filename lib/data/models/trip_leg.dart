@@ -32,6 +32,21 @@ class TripLeg extends Equatable {
         status: status ?? this.status,
       );
 
+  /// The shape the native service's route takes for one stop
+  /// (see SnoozeTrackingService.TargetStop.fromJson).
+  Map<String, dynamic> toNativeRouteLeg() => <String, dynamic>{
+        'stopId':       stop.id,
+        'stopName':     stop.name,
+        'lat':          stop.latitude,
+        'lon':          stop.longitude,
+        'radiusMetres': wakeRadiusMetres,
+        'alarmStyle':   alarmStyle == AlarmStyle.subtlePulse
+            ? 'subtlePulse'
+            : 'defconDrill',
+        'mode':         stop.mode.name,
+        if (stop.wifiSsid != null) 'ssid': stop.wifiSsid!,
+      };
+
   @override
   List<Object?> get props => [stop, wakeRadiusMetres, alarmStyle, status];
 }

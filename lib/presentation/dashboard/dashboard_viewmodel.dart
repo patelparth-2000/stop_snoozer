@@ -127,14 +127,19 @@ class DashboardCubit extends Cubit<DashboardState> {
     final distance      = (event['distanceMetres'] as num?)?.toDouble() ?? 0.0;
     final firedAt       = (event['firedAt']        as num?)?.toInt();
     final countdownSecs = (event['countdownSecs']  as num?)?.toInt() ?? 5;
-    final stop = state.activeLeg?.stop ??
-        StopPoint(
-          id: event['stopId'] as String? ?? '',
-          name: event['stopName'] as String? ?? 'Your Stop',
-          latitude: 0,
-          longitude: 0,
-          mode: TransitMode.bus,
-        );
+    final stopId        = event['stopId'] as String? ?? '';
+    // The alarm is for whichever stop the service says fired — a saved stop
+    // can ring mid-trip, so this must not assume it is the trip's active leg.
+    final legIndex = state.legs.indexWhere((l) => l.stop.id == stopId);
+    final stop = legIndex >= 0
+        ? state.legs[legIndex].stop
+        : StopPoint(
+            id: stopId,
+            name: event['stopName'] as String? ?? 'Your Stop',
+            latitude: 0,
+            longitude: 0,
+            mode: TransitMode.bus,
+          );
     _recordAlarmEvent(stop.id, stop.name, distance);
     emit(state.copyWith(
       alarmStop: stop,
@@ -142,6 +147,7 @@ class DashboardCubit extends Cubit<DashboardState> {
       alarmFiredAt: firedAt,
       alarmCountdownSecs: countdownSecs,
     ));
+    if (legIndex >= 0 && legIndex == state.activeIndex) _completeActiveLeg();
   }
 
   void _recordAlarmEvent(String stopId, String stopName, double distanceMetres) {
@@ -192,10 +198,16 @@ class DashboardCubit extends Cubit<DashboardState> {
       emit(state.copyWith(isLocating: false));
     }
 
+    // Redraw a trip the native service is still running — the app may have
+    // been closed or killed since it was armed.
+    await _restoreActiveRoute();
+
     // If a group-based commute alarm fired while app was inactive, load the
     // full trip group so all legs are tracked in sequence.
     final pendingGroupId = await _platform.checkPendingTripGroup();
-    if (pendingGroupId != null) {
+    // A trip already running natively (e.g. a scheduled trip that started as
+    // a route) must not be restarted from its first stop.
+    if (pendingGroupId != null && !state.hasActiveTrip) {
       final group = await _groupsRepo.findById(pendingGroupId);
       if (group != null && group.legs.isNotEmpty) {
         loadTrip(group.legs);
@@ -249,14 +261,60 @@ class DashboardCubit extends Cubit<DashboardState> {
   }
 
   void loadTrip(List<TripLeg> legs) {
+    if (legs.isEmpty) return;
     final armed = [
-      if (legs.isNotEmpty) legs.first.copyWith(status: LegStatus.active),
+      legs.first.copyWith(status: LegStatus.active),
       ...legs.skip(1).map((l) => l.copyWith(status: LegStatus.queued)),
     ];
-    emit(state.copyWith(legs: armed, activeIndex: 0));
-    _startTrackingActive(armed);
+    final first = armed.first.stop;
+    emit(state.copyWith(
+      legs: armed,
+      activeIndex: 0,
+      trackingMode: first.wifiSsid != null
+          ? TrackingMode.subterranean
+          : TrackingMode.aboveGround,
+    ));
+    // The whole trip goes to the native service, which arms each stop in turn
+    // as the previous alarm is dismissed — from the notification, the alarm
+    // screen, or with the app closed. Arming only the first stop from here
+    // used to end the trip the moment stop 1 was dismissed.
+    _platform.startRoute(armed.map((l) => l.toNativeRouteLeg()).toList());
     // Auto-save destination stop so it appears in Saved Stops
-    if (legs.isNotEmpty) _saveStop(legs.first);
+    _saveStop(legs.first);
+  }
+
+  Future<void> _restoreActiveRoute() async {
+    if (state.hasActiveTrip) return;
+    final route = await _platform.getActiveRoute();
+    final raw = route?['legs'];
+    if (raw is! List || raw.isEmpty) return;
+    final index = (route?['index'] as num?)?.toInt() ?? 0;
+    final legs = <TripLeg>[];
+    for (var i = 0; i < raw.length; i++) {
+      final m = Map<String, dynamic>.from(raw[i] as Map);
+      legs.add(TripLeg(
+        stop: StopPoint.fromMap({
+          'id':        m['stopId'] ?? '',
+          'name':      m['stopName'] ?? '',
+          'lat':       m['lat'] ?? 0,
+          'lng':       m['lon'] ?? 0,
+          'mode':      m['mode'] ?? 'bus',
+          'wifi_ssid': m['ssid'],
+        }),
+        wakeRadiusMetres: ((m['radius'] ?? m['radiusMetres'] ?? 300) as num).toDouble(),
+        alarmStyle: m['alarmStyle'] == 'subtlePulse'
+            ? AlarmStyle.subtlePulse
+            : AlarmStyle.defconDrill,
+        status: i < index
+            ? LegStatus.complete
+            : (i == index ? LegStatus.active : LegStatus.queued),
+      ));
+    }
+    emit(state.copyWith(
+      legs: legs,
+      activeIndex: index.clamp(0, legs.length - 1),
+      trackingMode: TrackingMode.aboveGround,
+    ));
   }
 
   Future<void> _saveStop(TripLeg leg) async {
@@ -281,15 +339,25 @@ class DashboardCubit extends Cubit<DashboardState> {
         .map((l) => l.id == id ? l.copyWith(isActive: turnOn) : l)
         .toList();
 
-    final active = updated.where((l) => l.isActive).toList();
-    if (active.isEmpty) {
-      _platform.stopTracking();
-      _platform.stopAlarm();
-      emit(state.copyWith(savedLocations: updated, trackingMode: TrackingMode.idle));
-      return;
-    }
+    emit(state.copyWith(savedLocations: updated));
+    _pushSavedTargets(updated);
+  }
 
-    // Build the targets list and push to the service in one call
+  Future<void> deleteSavedLocation(String id) async {
+    final wasActive =
+        state.savedLocations.any((l) => l.id == id && l.isActive);
+    await _savedRepo.delete(id);
+    final updated = state.savedLocations.where((l) => l.id != id).toList();
+    emit(state.copyWith(savedLocations: updated));
+    // Deleting a switched-on stop used to leave the service tracking it, so a
+    // stop that was no longer in the list still rang.
+    if (wasActive) _pushSavedTargets(updated);
+  }
+
+  /// Sends the switched-on saved stops to the service. An empty list is sent
+  /// too: the service then stops tracking saved stops, but keeps any trip.
+  void _pushSavedTargets(List<SavedLocation> all) {
+    final active = all.where((l) => l.isActive).toList();
     final targets = active.map((l) {
       final stop = l.toStopPoint();
       return <String, dynamic>{
@@ -305,52 +373,15 @@ class DashboardCubit extends Cubit<DashboardState> {
 
     final hasWifi = active.any((l) => l.toStopPoint().wifiSsid != null);
     emit(state.copyWith(
-      savedLocations: updated,
-      trackingMode: hasWifi ? TrackingMode.subterranean : TrackingMode.aboveGround,
+      trackingMode: active.isNotEmpty
+          ? (hasWifi ? TrackingMode.subterranean : TrackingMode.aboveGround)
+          : (state.hasActiveTrip ? state.trackingMode : TrackingMode.idle),
     ));
   }
 
-  Future<void> deleteSavedLocation(String id) async {
-    await _savedRepo.delete(id);
-    final updated = state.savedLocations.where((l) => l.id != id).toList();
-    emit(state.copyWith(savedLocations: updated));
-  }
-
-  void _startTrackingActive(List<TripLeg> legs) {
-    if (legs.isEmpty) return;
-    final leg   = legs.first;
-    final stop  = leg.stop;
-    final style = leg.alarmStyle == AlarmStyle.subtlePulse ? 'subtlePulse' : 'defconDrill';
-    final mode  = stop.wifiSsid != null
-        ? TrackingMode.subterranean
-        : TrackingMode.aboveGround;
-    emit(state.copyWith(trackingMode: mode));
-    if (stop.wifiSsid != null) {
-      _platform.startHybridSensing(
-        targetSsid:   stop.wifiSsid!,
-        stopId:       stop.id,
-        stopName:     stop.name,
-        lat:          stop.latitude,
-        lon:          stop.longitude,
-        radiusMetres: leg.wakeRadiusMetres,
-        alarmStyle:   style,
-      );
-    } else {
-      _platform.startGeofence(
-        stopId:       stop.id,
-        stopName:     stop.name,
-        lat:          stop.latitude,
-        lon:          stop.longitude,
-        radiusMetres: leg.wakeRadiusMetres,
-        alarmStyle:   style,
-      );
-    }
-  }
-
-  /// Called when the user dismisses the alarm screen.
-  /// Marks the current leg complete and starts tracking the next one,
-  /// or clears the trip if all legs are done.
-  void advanceLeg() {
+  /// Marks the active leg done and the next one active. Display only: the
+  /// native service arms the next stop itself when this alarm is dismissed.
+  void _completeActiveLeg() {
     if (state.legs.isEmpty) return;
     final legs = [...state.legs];
     legs[state.activeIndex] =
@@ -360,21 +391,32 @@ class DashboardCubit extends Cubit<DashboardState> {
     if (nextIndex < legs.length) {
       legs[nextIndex] = legs[nextIndex].copyWith(status: LegStatus.active);
       emit(state.copyWith(legs: legs, activeIndex: nextIndex));
-      _startTrackingActive(legs.sublist(nextIndex));
     } else {
       emit(state.copyWith(legs: legs));
-      Future.delayed(const Duration(seconds: 2), clearTrip);
+      _tripDoneTimer?.cancel();
+      _tripDoneTimer = Timer(const Duration(seconds: 2), _clearTripDisplay);
     }
   }
 
-  void clearTrip() {
-    _platform.stopTracking();
-    _location.stopTracking();
+  Timer? _tripDoneTimer;
+
+  void _clearTripDisplay() {
+    if (isClosed) return;
     emit(state.copyWith(
       legs: [],
       activeIndex: 0,
-      trackingMode: TrackingMode.idle,
+      trackingMode: state.savedLocations.any((l) => l.isActive)
+          ? state.trackingMode
+          : TrackingMode.idle,
     ));
+  }
+
+  /// Ends the trip early. Saved stops keep being tracked.
+  void clearTrip() {
+    _tripDoneTimer?.cancel();
+    _platform.stopRoute();
+    _location.stopTracking();
+    _clearTripDisplay();
   }
 
   String get greeting {
@@ -387,6 +429,7 @@ class DashboardCubit extends Cubit<DashboardState> {
   @override
   Future<void> close() {
     _alarmSub?.cancel();
+    _tripDoneTimer?.cancel();
     return super.close();
   }
 }

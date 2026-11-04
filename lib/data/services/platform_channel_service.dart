@@ -140,8 +140,45 @@ class PlatformChannelService {
     } on PlatformException catch (_) {}
   }
 
-  /// Replaces the full set of actively-tracked stops.
-  /// Passing an empty list stops the service.
+  /// Hands a whole trip — several stops, alarmed one after another — to the
+  /// native service. The service owns the sequence: dismissing a stop's alarm
+  /// arms the next one even when the app is closed. Replaces any previous trip;
+  /// saved stops keep being tracked alongside it.
+  ///
+  /// Each map: `stopId`, `stopName`, `lat`, `lon`, `radiusMetres`, and
+  /// optionally `ssid`, `alarmStyle`, `mode`.
+  Future<void> startRoute(List<Map<String, dynamic>> legs) async {
+    try {
+      await _method.invokeMethod<void>('startRoute', {'legs': legs});
+    } on PlatformException catch (_) {}
+  }
+
+  /// Ends the trip only; saved stops keep being tracked.
+  Future<void> stopRoute() async {
+    try {
+      await _method.invokeMethod<void>('stopRoute');
+    } on PlatformException catch (_) {}
+  }
+
+  /// The trip the native service is running, so the dashboard can show it
+  /// again after the app was closed. Null when no trip is active.
+  ///
+  /// Returns `{'legs': [...same maps as startRoute...], 'index': int}`.
+  Future<Map<String, dynamic>?> getActiveRoute() async {
+    try {
+      final raw = await _method.invokeMethod<String>('getActiveRoute');
+      if (raw == null || raw.isEmpty) return null;
+      return Map<String, dynamic>.from(jsonDecode(raw) as Map);
+    } on PlatformException catch (_) {
+      return null;
+    } on FormatException catch (_) {
+      return null;
+    }
+  }
+
+  /// Replaces the set of saved stops being tracked (the active trip, if any,
+  /// is unaffected). Passing an empty list with no trip running stops the
+  /// service.
   Future<void> updateTrackingTargets(List<Map<String, dynamic>> targets) async {
     try {
       await _method.invokeMethod<void>('updateTrackingTargets', {'targets': targets});
@@ -255,6 +292,10 @@ class PlatformChannelService {
     required List<int> weekdays,
     String? specificDate,
     String? tripGroupId,
+    /// The trip group's stops (TripLeg.toNativeRouteLeg). When given, the
+    /// alarm starts the whole trip natively, so later stops are armed even
+    /// if the app is never opened.
+    List<Map<String, dynamic>>? routeLegs,
   }) async {
     try {
       await _method.invokeMethod<void>('scheduleCommuteAlarm', {
@@ -270,6 +311,9 @@ class PlatformChannelService {
         'weekdays':     _encodeWeekdays(weekdays),
         'specificDate': specificDate,
         'tripGroupId':  tripGroupId,
+        'routeJson':    routeLegs == null || routeLegs.isEmpty
+            ? null
+            : jsonEncode(routeLegs),
       });
     } on PlatformException catch (_) {}
   }

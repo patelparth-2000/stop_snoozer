@@ -4,6 +4,7 @@ import '../../data/models/alarm_event.dart';
 import '../../data/models/commute_alarm.dart';
 import '../../data/repositories/alarm_history_repository.dart';
 import '../../data/repositories/commute_alarms_repository.dart';
+import '../../data/repositories/trip_groups_repository.dart';
 import '../../data/services/platform_channel_service.dart';
 
 // ── State ──────────────────────────────────────────────────────────────────
@@ -115,7 +116,13 @@ class CommuteAlarmsCubit extends Cubit<CommuteAlarmsState> {
     emit(state.copyWith(alarms: list));
   }
 
-  Future<void> _scheduleNative(CommuteAlarm a) => _platform.scheduleCommuteAlarm(
+  Future<void> _scheduleNative(CommuteAlarm a) async {
+    final groupId = a.tripGroupId;
+    final group = groupId == null
+        ? null
+        : await TripGroupsRepository.instance.findById(groupId);
+    final legs = group?.legs.map((l) => l.toNativeRouteLeg()).toList();
+    await _platform.scheduleCommuteAlarm(
         alarmId:      a.id,
         hour:         a.departureHour,
         minute:       a.departureMinute,
@@ -127,5 +134,7 @@ class CommuteAlarmsCubit extends Cubit<CommuteAlarmsState> {
         weekdays:     a.weekdays,
         specificDate: a.specificDate,
         tripGroupId:  a.tripGroupId,
+        routeLegs:    legs,
       );
+  }
 }

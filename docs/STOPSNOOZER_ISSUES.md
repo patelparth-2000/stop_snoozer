@@ -5,10 +5,10 @@
 | | |
 |---|---|
 | **Created** | 2026-08-08 |
-| **Last updated** | 2026-08-10 |
+| **Last updated** | 2026-11-03 |
 | **Scope** | Verified against the working tree — not a generic checklist |
 | **Companion docs** | [STOPSNOOZER_PLAN.md](STOPSNOOZER_PLAN.md) · [STOP_SNOOZER_CONTINUATION.md](STOP_SNOOZER_CONTINUATION.md) · [PLAY_SUBMISSION.md](PLAY_SUBMISSION.md) |
-| **Status** | **21 of 50 resolved, 29 open** (2026-08-10). Remaining work is concentrated in the field test, engine correctness, and product gaps. |
+| **Status** | **37 of 69 resolved, 32 open** (2026-11-03). Remaining work is concentrated in the field test, engine correctness, and product gaps. |
 
 > **Correction (2026-08-09):** an earlier revision of this file claimed "28 of 49
 > resolved". That was an arithmetic error on my part — the per-severity counts
@@ -200,7 +200,8 @@ Consequence: two scans at the same platform advance the index twice. Wi-Fi bleed
 Consequence: after an OEM kill mid-journey, the app believes the user is back at the boarding station and will not alarm at the right place. Currently mitigated only by the fail-safe firing early — which will not trigger, because confidence resets to full.
 **Fix:** persist `currentIndex`, confidence and `lastArrivalElapsedMs` on every advance; on resume, restore them *and* apply a confidence penalty for the gap.
 
-### I-09 · P1 · Per-leg alarm style ignored in multi-target mode **[verified]**
+### I-09 · P1 · ~~Per-leg alarm style ignored in multi-target mode~~ — **RESOLVED 2026-11-03** (trips) **[verified]**
+Trip stops now carry their own `alarmStyle` to the native route and each rings in its own style. Saved stops have no per-stop style and use the default.
 `startGeofence`/`startHybridSensing` accept `alarmStyle`, but `updateTrackingTargets` does not send it and native `TargetStop` has no such field. Every leg falls back to the global setting.
 Consequence: a user who sets a gentle alert for one leg and a loud one for another gets the same alert for both.
 
@@ -234,6 +235,77 @@ Currently benign because `alarmFired` guards a double alarm, but the two subsyst
 ### I-17 · P2 · No user-facing way to end underground tracking
 `route_select` starts tracking; nothing stops it short of the generic "Stop Tracking" notification action. There is no journey-complete state and no UI reflecting live engine position.
 
+### I-50 · P0 · ~~A long platform wait silently disables the underground alarm~~ — **RESOLVED 2026-11-02** **[reproduced]**
+The first leg's clock started at "Start Tracking", not at departure — and the designed flow is to start tracking above ground. The walk down plus the platform wait counted as travel time, so once they exceeded the timing ceiling (`3 × peak run time`, ~4–8 min on most legs) every real arrival at the first station was rejected. A timing rejection costs no confidence, so the engine sat at the boarding station at full confidence: no alarm, no low-confidence early wake. A silent miss.
+Reproduced by driving the real `UndergroundEngine` with synthetic sensor streams (JVM harness with Android stubs): walk 90 s + wait 300 s → `END index=0 conf=1.00`, no alarm; also with a 45 s tunnel hold on leg 1.
+**Fix:** `legStartKnown` — until the clock is anchored to a real arrival (advance, `confirmPosition`, or a restored checkpoint), elapsed time is only an upper bound on travel time, so the floor still applies but the ceiling does not. Same scenarios now alarm at the target; all other scenarios unchanged.
+**Guard:** none automated in the repo — there is still no native test harness (I-23).
+
+### I-51 · P1 · First-leg timing floor is not a real floor **[reproduced]**
+Same root as I-50: before the first confirmed arrival, elapsed time includes the platform wait, so the floor (`0.85 × unimpeded run time`) is passed by any full stop after a long enough wait. A user who fidgets on the platform after ~4 min, or a tunnel hold on leg 1 after a long wait, is counted as arriving at the first station. The tracker then runs one stop ahead and fires the target alarm one stop **early, at full confidence, with no explanation**. Present before and after the I-50 fix (the I-50 fix turned the hold case from a silent miss into this).
+Proper fix is departure detection (start the leg clock when the train leaves the boarding platform), which needs F2 accelerometer/barometer logs to tell boarding from walking. Interim option: make first-leg arrivals always cost confidence so the alarm carries the honest "early" message.
+
+---
+
+## 2b. Alarm sequencing and saved stops — audit of 2026-11-03
+
+Found by driving the real `SnoozeTrackingService` with fake GPS fixes in
+Robolectric (`android/app/src/test/`, 45 tests) and the dashboard with a fake
+platform channel (`test/dashboard_trip_test.dart`, 9 tests). Every resolved
+item below has a test that failed on the old code (I-62 excepted, see there).
+
+### I-52 · P0 · ~~Stopping one stop's alarm ended the whole trip~~ — **RESOLVED 2026-11-03** **[reproduced]**
+The trip's stop list lived only in `DashboardCubit`; the service was given stop 1 alone as a single geofence. The only code that armed stop 2 (`advanceLeg`) ran from the in-app alarm screen, which nothing opened (I-53). So "Stop Alarm" — from the notification, or with the app closed — ended tracking, and stops 2…n never rang.
+**Fix:** the route lives natively (`ACTION_START_ROUTE`, persisted in prefs). Dismissing a stop's alarm arms the next; only the first dismiss of an alarm advances, so notification + screen cannot skip a stop. Survives process death. `ACTION_START_GEOFENCE`/`HYBRID` are now one-stop routes.
+
+### I-53 · P1 · ~~The full-screen alarm screen was unreachable~~ — **RESOLVED 2026-11-03** **[verified]**
+`DashboardScreen`'s alarm listener only cleared the state; nothing navigated to `/alarm`. It now opens the alarm screen (live alarm or app opened from the alarm notification).
+
+### I-54 · P1 · ~~"Stop Tracking" did not stop saved stops~~ — **RESOLVED 2026-11-03** **[reproduced]**
+`ACTION_STOP` shared `dismissAlarm()`, which in multi-stop mode reset the alarm and kept tracking. It now ends everything.
+
+### I-55 · P1 · ~~A switched-off saved stop still rang~~ — **RESOLVED 2026-11-03** **[reproduced]**
+Turning off the last saved stop sent stop + stop-alarm, both of which hit I-54. It now sends an empty saved list; the service stops unless a trip is running.
+
+### I-56 · P1 · ~~A deleted saved stop still rang~~ — **RESOLVED 2026-11-03** **[verified]**
+`deleteSavedLocation` removed the row but never told the service. It now re-sends the active list.
+
+### I-57 · P1 · ~~A snoozed saved stop never rang again~~ — **RESOLVED 2026-11-03** **[reproduced]**
+`triggerAlarm` removes the fired stop from the list; snooze re-armed sensors but not the stop. Snooze now re-arms it, and a dismiss/stop during the snooze cancels the re-arm (which previously could restart tracking on a stopped service).
+
+### I-58 · P1 · ~~A trip's stop was ignored while any saved stop was on~~ — **RESOLVED 2026-11-03** **[reproduced]**
+`checkLocationAndTrigger` checks only the multi-stop list when it is non-empty, so a single-geofence trip stop never fired. Trips and saved stops now share one list.
+
+### I-59 · P2 · ~~Saved stops ignored the user's wake radius~~ — **RESOLVED 2026-11-03** **[reproduced]**
+Dart sends `radiusMetres`; `TargetStop.fromJson` read only `radius`, so every saved stop used 300 m. Both keys are now read.
+
+### I-60 · P1 · ~~Opening the app mid-trip could wipe the trip~~ — **RESOLVED 2026-11-03** **[verified]**
+`DashboardCubit.load()` re-sends active saved stops on every cold start, and `ACTION_UPDATE_TARGETS` replaced the whole list. It now replaces saved stops only. The dashboard also redraws a trip the service is still running (`getActiveRoute`).
+
+### I-61 · P1 · ~~Scheduled trip: only the first stop was armed unless the app was opened~~ — **RESOLVED 2026-11-03** **[verified]**
+`CommuteAlarmReceiver` armed one stop and left `pending_trip_group_id` for Dart. The group's stops are now stored with the schedule and the receiver starts the route natively.
+
+### I-62 · P1 · ~~Multi-stop tracking with location off was silent~~ — **RESOLVED 2026-11-03**
+`startMultiTargetTracking` skipped GPS when location was off and warned nobody. It now warns and still registers the request, which the fused provider honours once location returns. (The test was written with the fix, not run red first.)
+
+### I-63 · P1 · ~~An alarm ringing when the process died was lost~~ — **RESOLVED 2026-11-03** **[reproduced]**
+The ringtone dies with the process and the fired stop had already been removed. The un-dismissed stop is now persisted and re-armed on restart, so it rings again.
+
+### I-67 · P1 · ~~"Test your alarm" during a trip ended the trip~~ — **RESOLVED 2026-11-03** **[reproduced]**
+`ACTION_SELF_TEST_FIRE` cleared the tracked stops before ringing; dismissing it then stopped the service and wiped the route. The self-test now leaves the stops alone, is ignored while a real alarm rings, and its dismiss never advances a trip.
+
+### I-68 · P2 · Alarm countdown on screen does not match the sound
+`ALARM_COUNTDOWN_SECS` is 3 and the screen counts down from it (5 when the app is reopened from the notification, hard-coded in `checkPendingAlarm`), but `triggerAlarm` starts the ringtone after 500 ms. Either delay the sound to match or drop the countdown — a product call, not changed.
+
+### I-64 · P3 · Alarm screen stays open after dismissing from the notification
+The service sends no "dismissed" event to Dart. Harmless (sliding it is a no-op now), but stale.
+
+### I-65 · P3 · No in-app way to end a trip early
+`DashboardCubit.clearTrip()` (ends the trip, keeps saved stops) has no button. The notification's "Stop Tracking" ends everything.
+
+### I-66 · P3 · `LocationTrackingBloc` is dead and calls channel methods that do not exist
+`startUndergroundTracking` with `targetSsid`, `startAboveGroundTracking`. Unused by the app; a trap for a contributor.
+
 ---
 
 ## 3. Incomplete work and dead code
@@ -261,6 +333,7 @@ No `WorkManager` TfL/Darwin caching (so no delay-aware timing), no Activity Tran
 ### I-23 · P2 · No tests for any native code **[verified]**
 26 Dart tests exist; `UndergroundEngine`, the fusion rule, the confidence machine, `CellObserver`'s staleness filter and `AlarmScheduler` have **zero** coverage. The most safety-critical logic in the app is the least tested.
 **Fix:** the fusion logic is pure arithmetic over injected samples — extract it behind an interface and unit-test it with synthetic pressure/accel traces, including a simulated tunnel hold.
+**Progress 2026-11-03:** a Robolectric harness now exists (`android/app/src/test/`, run with `cd android && ./gradlew :app:testDebugUnitTest`) — 45 tests over `SnoozeTrackingService`, `AlarmScheduler`, `CommuteAlarmReceiver` and `BootReceiver` (fake GPS fixes, process death, snooze, scheduled trips). `UndergroundEngine` is still untested in the repo.
 
 ### I-24 · P2 · Widget test is trivial
 `widget_test.dart` asserts the app renders. No screen has behavioural coverage.
@@ -379,19 +452,19 @@ Depth is relative to the boarding surface, but `StationDepths` will be absolute 
 
 | Severity | Total | Resolved | Open |
 |---|---|---|---|
-| **P0** | 6 | 3 | 3 |
-| **P1** | 12 | 9 | 3 |
-| **P2** | 19 | 8 | 11 |
-| **P3** | 10 | 1 | 9 |
+| **P0** | 8 | 5 | 3 |
+| **P1** | 24 | 21 | 3 |
+| **P2** | 21 | 9 | 12 |
+| **P3** | 13 | 1 | 12 |
 | **Design tensions** | 3 | 1 | 2 |
-| **Total** | **50** | **21** | **29** |
+| **Total** | **69** | **37** | **32** |
 
 Resolved: I-04, I-05, I-06, I-07, I-08, I-10, I-11, I-12, I-18, I-20, I-21,
 I-25, I-28, I-33, I-35, I-36, I-37, I-46 — plus I-27 in part (SDK pinned, boot
 path hardened; API 36 FGS behaviour still unverified on hardware) and I-01 in
 part (Gradle wired; keystore outstanding).
 
-Counts changed from 49 to 50 with the addition of I-49.
+Counts changed from 49 to 50 with the addition of I-49, and to 52 with I-50 (resolved) and I-51 (2026-11-02). **Correction (2026-11-03):** the 2026-11-02 totals said 22 resolved / 30 open, but the severity rows summed to 23 / 29 — an arithmetic slip in that edit. Now 69 with I-52…I-68.
 
 **Read the P1 column with care.** Nine of twelve resolved looks close to done,
 but every one of the three remaining P0s is either a field test the code cannot
@@ -407,6 +480,8 @@ only you can generate (I-01). None of them get closer by writing more code.
 | # | ID | Issue | Effort |
 |---|---|---|---|
 | 1 | **I-02** | **Shipped asset is still the old v2 build.** None of the new depth/run-time/topology data is in the app. Underground tracking shows "Route data not installed" and falls back to GPS. | One command: `python tools/build_naptan_db.py --all` |
+| 1b | **I-51** | **First-leg false arrival after a long platform wait.** A platform fidget or a leg-1 tunnel hold counts as reaching the first station, so the target alarm fires one stop early at full confidence with no explanation. | Needs F2 for the proper fix |
+| 1c | **I-23** | **Native tests now exist for the tracking service** (45 Robolectric tests, `android/app/src/test/`). `UndergroundEngine` itself still has none in the repo. | Medium |
 | 2 | **I-13** | **Engine stops at the first alarm target.** `finished = true` fires on the first `isTarget`, so only the first underground leg of a multi-leg journey alarms — and multi-leg is a headline feature. | Small |
 | 3 | **I-03** | **Fusion thresholds still uncalibrated.** Everything needed now exists; no part of the engine has met a train. | Needs F2 |
 | 4 | **I-01** | **No release keystore.** Gradle is wired and git-ignored; the `.jks` and `key.properties` are missing, so release builds are still debug-signed. | Needs your keystore |

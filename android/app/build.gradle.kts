@@ -72,6 +72,14 @@ android {
             }
         }
     }
+
+    // JVM tests for the native alarm pipeline (I-23). Robolectric runs the real
+    // SnoozeTrackingService against a simulated Android framework, so alarm
+    // behaviour can be checked with fake locations and simulated process death
+    // without a device. Run: `cd android && ./gradlew :app:testDebugUnitTest`.
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 flutter {
@@ -80,4 +88,7 @@ flutter {
 
 dependencies {
     implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }

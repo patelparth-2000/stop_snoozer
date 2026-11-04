@@ -50,7 +50,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
           listenWhen: (prev, curr) =>
               curr.alarmStop != null && curr.alarmStop != prev.alarmStop,
           listener: (context, state) {
+            // Show the full-screen alarm (countdown, slide-to-dismiss, snooze).
+            // This listener used to only clear the state, so the alarm screen
+            // was unreachable and the notification was the only way to act.
+            final extra = <String, dynamic>{
+              'stop':          state.alarmStop,
+              'distance':      state.alarmDistanceMetres ?? 0.0,
+              'firedAt':       state.alarmFiredAt ?? 0,
+              'countdownSecs': state.alarmCountdownSecs,
+            };
             context.read<DashboardCubit>().clearAlarm();
+            context.push('/alarm', extra: extra);
           },
         ),
         BlocListener<DashboardCubit, DashboardState>(

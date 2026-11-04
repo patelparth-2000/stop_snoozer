@@ -111,6 +111,40 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
 
+                    "startRoute" -> {
+                        val routeJson = try {
+                            val list = call.argument<List<Map<String, Any?>>>("legs") ?: emptyList()
+                            org.json.JSONArray(list.map { org.json.JSONObject(it.filterValues { v -> v != null } as Map<*, *>) }).toString()
+                        } catch (_: Exception) { "[]" }
+                        val intent = Intent(this, SnoozeTrackingService::class.java).also {
+                            it.action = SnoozeTrackingService.ACTION_START_ROUTE
+                            it.putExtra(SnoozeTrackingService.EXTRA_ROUTE_JSON, routeJson)
+                        }
+                        ContextCompat.startForegroundService(this, intent)
+                        result.success(null)
+                    }
+
+                    "stopRoute" -> {
+                        val intent = Intent(this, SnoozeTrackingService::class.java).also {
+                            it.action = SnoozeTrackingService.ACTION_STOP_ROUTE
+                        }
+                        startService(intent)
+                        result.success(null)
+                    }
+
+                    "getActiveRoute" -> {
+                        val prefs = getSharedPreferences(SnoozeTrackingService.PREFS_NAME, MODE_PRIVATE)
+                        val legs  = prefs.getString(SnoozeTrackingService.PREF_ROUTE_JSON, null)
+                        if (legs == null) {
+                            result.success(null)
+                        } else {
+                            val out = org.json.JSONObject()
+                            out.put("legs", org.json.JSONArray(legs))
+                            out.put("index", prefs.getInt(SnoozeTrackingService.PREF_ROUTE_INDEX, 0))
+                            result.success(out.toString())
+                        }
+                    }
+
                     "startHybridSensing" -> {
                         val intent = Intent(this, SnoozeTrackingService::class.java).also {
                             it.action = SnoozeTrackingService.ACTION_START_HYBRID
@@ -259,10 +293,11 @@ class MainActivity : FlutterActivity() {
                         val hour        = call.argument<Int>("hour")           ?: 0
                         val minute      = call.argument<Int>("minute")         ?: 0
                         val tripGroupId = call.argument<String>("tripGroupId")
+                        val routeJson   = call.argument<String>("routeJson")
                         AlarmScheduler.scheduleAndSave(
                             this, id, hour, minute,
                             stopId, stopName, lat, lon,
-                            ssid, radius, weekdays, specDate, tripGroupId
+                            ssid, radius, weekdays, specDate, tripGroupId, routeJson
                         )
                         result.success(null)
                     }

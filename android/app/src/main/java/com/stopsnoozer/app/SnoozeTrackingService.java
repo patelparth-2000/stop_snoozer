@@ -28,6 +28,7 @@ import android.provider.Settings;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 
@@ -84,6 +85,21 @@ public class SnoozeTrackingService extends Service {
     private static final String PREF_TRACKING_RADIUS    = "tracking_radius";
     private static final String PREF_TRACKING_SSID      = "tracking_ssid";
 
+    // ── Route: several stops alarmed one after another ─────────────────────
+    //
+    // The route lives here, not in Dart, for the same reason the underground
+    // engine does: Dart is not guaranteed alive. When it lived in
+    // DashboardCubit, stopping stop 1's alarm from the notification (or with
+    // the app closed) ended the whole trip, because the service never knew
+    // there was a stop 2.
+    static final String ACTION_START_ROUTE = "com.stopsnoozer.app.START_ROUTE";
+    static final String ACTION_STOP_ROUTE  = "com.stopsnoozer.app.STOP_ROUTE";
+    static final String EXTRA_ROUTE_JSON   = "routeJson";
+    static final String PREF_ROUTE_JSON    = "tracking_route_json";
+    static final String PREF_ROUTE_INDEX   = "tracking_route_index";
+    /** The stop whose alarm is ringing or snoozed, until the user dismisses it. */
+    private static final String PREF_FIRED_TARGET = "tracking_fired_target_json";
+
     // ── Notification channels ──────────────────────────────────────────────
     private static final String TRACKING_CHANNEL_ID  = "snooze_tracking";
     private static final String ALARM_CHANNEL_ID     = "snooze_alarm";
@@ -135,6 +151,19 @@ public class SnoozeTrackingService extends Service {
     // Multi-target list — used by UPDATE_TARGETS (manual saved locations)
     private final ArrayList<TargetStop> targets = new ArrayList<>();
 
+    /** Ordered stops of the active route; empty when no route is running. */
+    private final ArrayList<TargetStop> route = new ArrayList<>();
+    /** Index into {@link #route} of the stop currently armed. */
+    private int routeIndex = 0;
+    /**
+     * The multi-target stop whose alarm fired and has not been dismissed yet.
+     * Dismissing it is what advances a route; snoozing re-arms it. Persisted,
+     * because a process kill while ringing must not lose the alarm.
+     */
+    private TargetStop firedTarget;
+    /** True while the "Test your alarm" alarm (not a real stop) is ringing. */
+    private boolean selfTestRinging;
+
     // ── Underground stack (v2) ─────────────────────────────────────────────
     private UndergroundEngine     undergroundEngine;
     private WifiPresenceDetector  wifiPresence;
@@ -156,6 +185,7 @@ public class SnoozeTrackingService extends Service {
         wifiManager     = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         wifiScanHandler = new Handler(Looper.getMainLooper());
         soundHandler    = new Handler(Looper.getMainLooper());
+        restoreRouteState();
     }
 
     /** True while location callbacks or Wi-Fi scanning are registered. */
@@ -181,22 +211,40 @@ public class SnoozeTrackingService extends Service {
         final String action = intent.getAction();
         switch (action) {
             case ACTION_START_GEOFENCE:
-                alarmFired        = false;
-                targetStopId      = intent.getStringExtra("stopId");
-                targetStopName    = intent.getStringExtra("stopName");
-                targetLat         = intent.getDoubleExtra("lat", 0);
-                targetLon         = intent.getDoubleExtra("lon", 0);
-                targetRadius      = intent.getFloatExtra("radiusMetres", 500f);
-                { String s = intent.getStringExtra("alarmStyle"); currentAlarmStyle = s != null && !s.isEmpty() ? s : "defconDrill"; }
+                // A single stop is a one-stop route. Running it through the
+                // shared target list is what lets it coexist with saved stops:
+                // as a separate single-target mode it was silently ignored
+                // whenever any saved stop was active.
                 if (!isLocationEnabled()) {
+                    targetStopName = intent.getStringExtra("stopName");
                     showLocationOffNotification();
-                    clearTrackingState();
-                    stopForeground(true);
-                    stopSelf();
+                    stopEverything();
                     return START_NOT_STICKY;
                 }
-                saveTrackingState(ACTION_START_GEOFENCE);
-                startAboveGroundTracking();
+                startRoute(java.util.Collections.singletonList(new TargetStop(
+                        intent.getStringExtra("stopId"),
+                        intent.getStringExtra("stopName"),
+                        intent.getDoubleExtra("lat", 0),
+                        intent.getDoubleExtra("lon", 0),
+                        intent.getFloatExtra("radiusMetres", 500f),
+                        null, false, intent.getStringExtra("alarmStyle"))));
+                break;
+
+            case ACTION_START_ROUTE: {
+                ArrayList<TargetStop> legs = new ArrayList<>();
+                try {
+                    JSONArray arr = new JSONArray(intent.getStringExtra(EXTRA_ROUTE_JSON));
+                    for (int i = 0; i < arr.length(); i++) {
+                        legs.add(TargetStop.fromJson(arr.getJSONObject(i)));
+                    }
+                } catch (Exception ignored) {}
+                if (legs.isEmpty()) break;
+                startRoute(legs);
+                break;
+            }
+
+            case ACTION_STOP_ROUTE:
+                stopRoute();
                 break;
 
             case ACTION_START_WIFI:
@@ -215,34 +263,48 @@ public class SnoozeTrackingService extends Service {
                 startSubterraneanTracking();
                 break;
 
-            case ACTION_START_HYBRID:
-                alarmFired        = false;
-                targets.clear();
-                targetStopId      = intent.getStringExtra("stopId");
-                targetStopName    = intent.getStringExtra("stopName");
-                targetLat         = intent.getDoubleExtra("lat", 0);
-                targetLon         = intent.getDoubleExtra("lon", 0);
-                targetRadius      = intent.getFloatExtra("radiusMetres", 300f);
-                targetSsid        = intent.getStringExtra("targetSsid");
-                { String s = intent.getStringExtra("alarmStyle"); currentAlarmStyle = s != null && !s.isEmpty() ? s : "defconDrill"; }
-                saveTrackingState(ACTION_START_HYBRID);
-                startHybridTracking();
+            case ACTION_START_HYBRID: {
+                // One-stop route with Wi-Fi corroboration; see ACTION_START_GEOFENCE.
+                String ssid = intent.getStringExtra("targetSsid");
+                startRoute(java.util.Collections.singletonList(new TargetStop(
+                        intent.getStringExtra("stopId"),
+                        intent.getStringExtra("stopName"),
+                        intent.getDoubleExtra("lat", 0),
+                        intent.getDoubleExtra("lon", 0),
+                        intent.getFloatExtra("radiusMetres", 300f),
+                        ssid != null && !ssid.isEmpty() ? ssid : null,
+                        false, intent.getStringExtra("alarmStyle"))));
                 break;
+            }
 
             case ACTION_UPDATE_TARGETS: {
+                // Replaces the SAVED stops only. The active route's stop is not
+                // the caller's to replace: Dart re-sends saved stops on every
+                // cold start, and that used to wipe a trip in progress.
                 String json = intent.getStringExtra("targetsJson");
-                targets.clear();
-                alarmFired = false;
+                ArrayList<TargetStop> saved = new ArrayList<>();
                 if (json != null && !json.isEmpty()) {
                     try {
                         JSONArray arr = new JSONArray(json);
                         for (int i = 0; i < arr.length(); i++) {
-                            targets.add(TargetStop.fromJson(arr.getJSONObject(i)));
+                            saved.add(TargetStop.fromJson(arr.getJSONObject(i)));
                         }
                     } catch (Exception ignored) {}
                 }
-                if (targets.isEmpty()) {
-                    dismissAlarm();
+                restoreTargetsIfEmpty();
+                for (int i = targets.size() - 1; i >= 0; i--) {
+                    if (!targets.get(i).routeLeg) targets.remove(i);
+                }
+                for (TargetStop s : saved) addTargetDedup(s);
+                // A saved stop that is ringing/snoozed and was just switched off
+                // must not come back when the snooze ends.
+                if (firedTarget != null && !firedTarget.routeLeg
+                        && !containsStop(saved, firedTarget.stopId)) {
+                    setFiredTarget(null);
+                }
+                alarmFired = false;
+                if (targets.isEmpty() && firedTarget == null) {
+                    stopEverything();
                     break;
                 }
                 saveTargetsJson();
@@ -285,10 +347,14 @@ public class SnoozeTrackingService extends Service {
                 double newLon  = intent.getDoubleExtra("lon", 0);
                 float  newRad  = intent.getFloatExtra("radiusMetres", 300f);
                 String newSsid = intent.getStringExtra("ssid");
+                // Replace a saved stop with the same id, but never a route stop:
+                // the route needs its own entry to advance when it is dismissed.
                 for (int i = targets.size() - 1; i >= 0; i--) {
-                    if (targets.get(i).stopId.equals(newId)) targets.remove(i);
+                    if (targets.get(i).stopId.equals(newId) && !targets.get(i).routeLeg) {
+                        targets.remove(i);
+                    }
                 }
-                targets.add(new TargetStop(newId, newName, newLat, newLon, newRad, newSsid));
+                addTargetDedup(new TargetStop(newId, newName, newLat, newLon, newRad, newSsid));
                 alarmFired = false;
                 saveTargetsJson();
                 saveTrackingState(ACTION_UPDATE_TARGETS);
@@ -297,7 +363,9 @@ public class SnoozeTrackingService extends Service {
             }
 
             case ACTION_STOP:
-                dismissAlarm();
+                // "Stop Tracking" means stop. It used to share dismissAlarm(),
+                // which in multi-stop mode only reset the alarm and carried on.
+                stopEverything();
                 break;
 
             case ACTION_STOP_ALARM:
@@ -342,8 +410,11 @@ public class SnoozeTrackingService extends Service {
             case ACTION_SELF_TEST_FIRE:
                 // Reached only via CommuteAlarmReceiver, i.e. the OS really did
                 // wake us. Fire the alarm UI with no tracking targets attached.
-                alarmFired      = false;
-                targets.clear();
+                // The tracked stops are left alone: clearing them (as this
+                // did) meant a self-test run during a trip ended the trip.
+                if (alarmFired) break;   // a real alarm is ringing; don't mask it
+                restoreTargetsIfEmpty();
+                selfTestRinging = true;
                 targetStopId    = "__selftest__";
                 targetStopName  = "Alarm Test — it works";
                 currentAlarmStyle = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -371,7 +442,8 @@ public class SnoozeTrackingService extends Service {
     // ── Above-ground GPS Geofencing + Network (underground) fallback ─────────
 
     /** Shared distance check — called by both GPS and network location callbacks. */
-    private void checkLocationAndTrigger(Location loc) {
+    @VisibleForTesting
+    void checkLocationAndTrigger(Location loc) {
         if (alarmFired) return;
         float[] dist = new float[1];
         if (!targets.isEmpty()) {
@@ -659,7 +731,17 @@ public class SnoozeTrackingService extends Service {
             if (names.length() > 0) names.append(", ");
             names.append(t.stopName);
         }
-        if (needGps  && isLocationEnabled()) startAboveGroundTracking();
+        if (needGps) {
+            // Request updates even with location switched off: the fused
+            // provider starts delivering as soon as it is switched back on.
+            // Skipping the request (as this did) meant a trip armed with
+            // location off never tracked again, and nobody was told.
+            if (!isLocationEnabled()) {
+                targetStopName = names.toString();
+                showLocationOffNotification();
+            }
+            startAboveGroundTracking();
+        }
         if (needWifi && isWifiEnabled())     startSubterraneanTracking();
         updateTrackingNotification("Tracking: " + names);
     }
@@ -687,12 +769,26 @@ public class SnoozeTrackingService extends Service {
         boolean hasRemaining = false;
         if (!targets.isEmpty()) {
             for (int i = targets.size() - 1; i >= 0; i--) {
-                if (targets.get(i).stopId.equals(stopId)) { targets.remove(i); break; }
+                if (targets.get(i).stopId.equals(stopId)) {
+                    TargetStop fired = targets.remove(i);
+                    setFiredTarget(fired);
+                    selfTestRinging = false;   // a real stop now owns the alarm
+                    // Each stop rings in its own style (I-09). playAlarmSound()
+                    // reads the pref, so persist it, not just the field.
+                    currentAlarmStyle = fired.alarmStyle != null ? fired.alarmStyle : "defconDrill";
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                            .putString(PREF_ALARM_STYLE_ACTIVE, currentAlarmStyle).apply();
+                    break;
+                }
             }
             hasRemaining = !targets.isEmpty();
-            if (hasRemaining) saveTargetsJson();
+            // Saved even when empty: a stale list would resurrect the fired stop
+            // after a process restart, ringing it twice.
+            saveTargetsJson();
         }
-        // Stop sensors only when this was the last target
+        // Stop sensors only when this was the last target. The service itself
+        // stays up: the alarm is still ringing, and dismissing it may arm the
+        // route's next stop.
         if (!hasRemaining) stopSensors();
 
         final long firedAt = System.currentTimeMillis();
@@ -862,19 +958,37 @@ public class SnoozeTrackingService extends Service {
 
         // Re-arm tracking after the snooze delay
         alarmFired = false;
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+        cancelPendingSnooze();
+        final TargetStop snoozed = firedTarget;
+        snoozeRunnable = () -> {
+            snoozeRunnable = null;
             String action = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                     .getString(PREF_TRACKING_ACTION, null);
+            if (action == null) return;   // tracking was stopped during the snooze
             if (ACTION_START_GEOFENCE.equals(action)) {
                 startAboveGroundTracking();
             } else if (ACTION_START_HYBRID.equals(action)) {
                 startHybridTracking();
             } else if (ACTION_UPDATE_TARGETS.equals(action)) {
+                // triggerAlarm() removed the fired stop from the list; without
+                // putting it back, a snoozed alarm never rang again.
+                if (snoozed != null && firedTarget == snoozed) addTargetDedup(snoozed);
+                saveTargetsJson();
                 startMultiTargetTracking();
             } else {
                 startSubterraneanTracking();
             }
-        }, snoozeMinutes * 60_000L);
+        };
+        soundHandler.postDelayed(snoozeRunnable, snoozeMinutes * 60_000L);
+    }
+
+    private Runnable snoozeRunnable;
+
+    private void cancelPendingSnooze() {
+        if (snoozeRunnable != null) {
+            soundHandler.removeCallbacks(snoozeRunnable);
+            snoozeRunnable = null;
+        }
     }
 
     /** Stops sound, cancels notification. In multi-target mode continues tracking remaining stops. */
@@ -893,18 +1007,188 @@ public class SnoozeTrackingService extends Service {
             mgr.cancel(ALARM_NOTIF_ID);
         }
 
-        // Multi-target: fired stop was already removed in triggerAlarm;
-        // sensors are still running for remaining targets — just reset alarm state.
+        cancelPendingSnooze();
+
+        // Multi-target: the fired stop was already removed in triggerAlarm.
+        // Dismissing it is the user saying "done with this stop" — for a route
+        // that means arming the next one. Only the first dismiss of a given
+        // alarm advances: the notification and the in-app screen can both send
+        // one, and advancing twice would skip a stop.
+        // Dismissing the self-test alarm is not "done with this stop".
+        TargetStop dismissed = selfTestRinging ? null : firedTarget;
+        selfTestRinging = false;
+        if (dismissed != null) {
+            setFiredTarget(null);
+            // Re-armed after a restart or snooze but dismissed before it rang
+            // again: it is done either way.
+            for (int i = targets.size() - 1; i >= 0; i--) {
+                if (targets.get(i).stopId.equals(dismissed.stopId)) targets.remove(i);
+            }
+            if (dismissed.routeLeg) {
+                routeIndex++;
+                armCurrentRouteLeg();
+                saveRouteState();
+            }
+        }
+
         if (!targets.isEmpty()) {
             alarmFired = false;
-            updateTrackingNotification("Tracking: " + getTargetNames());
+            saveTargetsJson();
+            saveTrackingState(ACTION_UPDATE_TARGETS);
+            // Sensors were stopped if the fired stop was the last one armed.
+            if (!isActivelyTracking()) startMultiTargetTracking();
+            else updateTrackingNotification("Tracking: " + getTargetNames());
             return;
         }
 
+        stopEverything();
+    }
+
+    /** Ends all tracking: route, saved stops, sensors, notifications, service. */
+    private void stopEverything() {
+        cancelPendingSnooze();
+        if (pendingSoundRunnable != null) {
+            soundHandler.removeCallbacks(pendingSoundRunnable);
+            pendingSoundRunnable = null;
+        }
+        if (alarmRingtone != null) {
+            alarmRingtone.stop();
+            alarmRingtone = null;
+        }
+        NotificationManager mgr = getSystemService(NotificationManager.class);
+        if (mgr != null) {
+            mgr.cancel(TRACKING_NOTIF_ID);
+            mgr.cancel(ALARM_NOTIF_ID);
+        }
         stopSensors();
         clearTrackingState();
         stopForeground(true);
         stopSelf();
+    }
+
+    // ── Route ──────────────────────────────────────────────────────────────
+
+    /** Starts a new route, replacing any previous one. Saved stops are kept. */
+    private void startRoute(java.util.List<TargetStop> legs) {
+        restoreTargetsIfEmpty();
+        // A new route replaces the old route, and any alarm still pending from
+        // it (ringing or snoozed) is abandoned along with it.
+        for (int i = targets.size() - 1; i >= 0; i--) {
+            if (targets.get(i).routeLeg) targets.remove(i);
+        }
+        if (firedTarget != null && firedTarget.routeLeg) setFiredTarget(null);
+        route.clear();
+        for (TargetStop l : legs) route.add(l.asRouteLeg());
+        routeIndex = 0;
+        armCurrentRouteLeg();
+        saveRouteState();
+        alarmFired = false;
+        saveTargetsJson();
+        saveTrackingState(ACTION_UPDATE_TARGETS);
+        startMultiTargetTracking();
+    }
+
+    /** Ends the route only; saved stops keep being tracked. */
+    private void stopRoute() {
+        restoreTargetsIfEmpty();
+        for (int i = targets.size() - 1; i >= 0; i--) {
+            if (targets.get(i).routeLeg) targets.remove(i);
+        }
+        if (firedTarget != null && firedTarget.routeLeg) setFiredTarget(null);
+        route.clear();
+        routeIndex = 0;
+        saveRouteState();
+        if (targets.isEmpty() && firedTarget == null) {
+            stopEverything();
+            return;
+        }
+        saveTargetsJson();
+        saveTrackingState(ACTION_UPDATE_TARGETS);
+        startMultiTargetTracking();
+    }
+
+    /** Puts the route's current stop into the tracked list, if there is one. */
+    private void armCurrentRouteLeg() {
+        for (int i = targets.size() - 1; i >= 0; i--) {
+            if (targets.get(i).routeLeg) targets.remove(i);
+        }
+        if (routeIndex < 0 || routeIndex >= route.size()) {
+            route.clear();
+            routeIndex = 0;
+            return;
+        }
+        TargetStop leg = route.get(routeIndex);
+        // A saved stop or scheduled alarm for the same place would ring a
+        // second time a few seconds later; the route's own entry wins.
+        for (int i = targets.size() - 1; i >= 0; i--) {
+            if (targets.get(i).stopId.equals(leg.stopId)) targets.remove(i);
+        }
+        targets.add(leg);
+    }
+
+    private void addTargetDedup(TargetStop t) {
+        if (!containsStop(targets, t.stopId)) targets.add(t);
+    }
+
+    private static boolean containsStop(java.util.List<TargetStop> list, String stopId) {
+        for (TargetStop t : list) if (t.stopId.equals(stopId)) return true;
+        return false;
+    }
+
+    /** After a process restart the in-memory list is empty; reload it. */
+    private void restoreTargetsIfEmpty() {
+        if (!targets.isEmpty()) return;
+        String tj = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(PREF_TARGETS_JSON, null);
+        if (tj == null) return;
+        try {
+            JSONArray arr = new JSONArray(tj);
+            for (int i = 0; i < arr.length(); i++) {
+                targets.add(TargetStop.fromJson(arr.getJSONObject(i)));
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void setFiredTarget(TargetStop t) {
+        firedTarget = t;
+        SharedPreferences.Editor ed = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+        if (t == null) ed.remove(PREF_FIRED_TARGET);
+        else ed.putString(PREF_FIRED_TARGET, t.toJson().toString());
+        ed.apply();
+    }
+
+    private void saveRouteState() {
+        SharedPreferences.Editor ed = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+        if (route.isEmpty()) {
+            ed.remove(PREF_ROUTE_JSON).remove(PREF_ROUTE_INDEX);
+        } else {
+            JSONArray arr = new JSONArray();
+            for (TargetStop t : route) arr.put(t.toJson());
+            ed.putString(PREF_ROUTE_JSON, arr.toString());
+            ed.putInt(PREF_ROUTE_INDEX, routeIndex);
+        }
+        ed.apply();
+    }
+
+    private void restoreRouteState() {
+        SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        route.clear();
+        String rj = p.getString(PREF_ROUTE_JSON, null);
+        if (rj != null) {
+            try {
+                JSONArray arr = new JSONArray(rj);
+                for (int i = 0; i < arr.length(); i++) {
+                    route.add(TargetStop.fromJson(arr.getJSONObject(i)).asRouteLeg());
+                }
+            } catch (Exception ignored) { route.clear(); }
+        }
+        routeIndex = p.getInt(PREF_ROUTE_INDEX, 0);
+        String fj = p.getString(PREF_FIRED_TARGET, null);
+        firedTarget = null;
+        if (fj != null) {
+            try { firedTarget = TargetStop.fromJson(new JSONObject(fj)); }
+            catch (Exception ignored) {}
+        }
     }
 
     // ── Tracking state persistence (survive process kill) ──────────────────
@@ -929,9 +1213,15 @@ public class SnoozeTrackingService extends Service {
 
     private void clearTrackingState() {
         targets.clear();
+        route.clear();
+        routeIndex = 0;
+        firedTarget = null;
         nudgedStopIds.clear();
         clearBeliefState();
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .remove(PREF_ROUTE_JSON)
+                .remove(PREF_ROUTE_INDEX)
+                .remove(PREF_FIRED_TARGET)
                 .remove(PREF_TRACKING_ACTION)
                 .remove(PREF_TRACKING_STOP_ID)
                 .remove(PREF_TRACKING_STOP_NAME)
@@ -1014,7 +1304,11 @@ public class SnoozeTrackingService extends Service {
                     targets.add(TargetStop.fromJson(arr.getJSONObject(i)));
                 }
             } catch (Exception ignored) {}
-            if (targets.isEmpty()) { stopSelf(); return; }
+            // An alarm that was ringing or snoozed when the process died has
+            // lost its sound and its snooze timer. Re-arm the stop so it rings
+            // again rather than being silently dropped.
+            if (firedTarget != null) addTargetDedup(firedTarget);
+            if (targets.isEmpty()) { stopEverything(); return; }
             startMultiTargetTracking();
         } else {
             stopSelf();
@@ -1491,14 +1785,33 @@ public class SnoozeTrackingService extends Service {
         final double lon;
         final float  radius;
         final String ssid; // null = GPS-only; non-null = also WiFi
+        /** True for the route's current stop; dismissing it arms the next. */
+        final boolean routeLeg;
+        /** "subtlePulse" / "defconDrill", or null to use the global setting. */
+        final String alarmStyle;
+        /** Transit mode name, carried only so the app can redraw the trip. */
+        String mode;
 
         TargetStop(String stopId, String stopName, double lat, double lon, float radius, String ssid) {
+            this(stopId, stopName, lat, lon, radius, ssid, false, null);
+        }
+
+        TargetStop(String stopId, String stopName, double lat, double lon, float radius,
+                   String ssid, boolean routeLeg, String alarmStyle) {
             this.stopId   = stopId   != null ? stopId   : "";
             this.stopName = stopName != null ? stopName : "";
             this.lat      = lat;
             this.lon      = lon;
             this.radius   = radius;
             this.ssid     = ssid;
+            this.routeLeg = routeLeg;
+            this.alarmStyle = alarmStyle != null && !alarmStyle.isEmpty() ? alarmStyle : null;
+        }
+
+        TargetStop asRouteLeg() {
+            TargetStop t = new TargetStop(stopId, stopName, lat, lon, radius, ssid, true, alarmStyle);
+            t.mode = mode;
+            return t;
         }
 
         JSONObject toJson() {
@@ -1510,19 +1823,32 @@ public class SnoozeTrackingService extends Service {
                 o.put("lon",      lon);
                 o.put("radius",   (double) radius);
                 if (ssid != null) o.put("ssid", ssid);
+                if (routeLeg) o.put("routeLeg", true);
+                if (alarmStyle != null) o.put("alarmStyle", alarmStyle);
+                if (mode != null) o.put("mode", mode);
                 return o;
             } catch (Exception e) { return new JSONObject(); }
         }
 
         static TargetStop fromJson(JSONObject o) {
-            return new TargetStop(
+            // Dart sends "radiusMetres"; this class persists "radius". Reading
+            // only "radius" made every saved stop use 300 m whatever the user set.
+            double radius = o.has("radius")
+                    ? o.optDouble("radius", 300)
+                    : o.optDouble("radiusMetres", 300);
+            String ssid = o.has("ssid") && !o.isNull("ssid") ? o.optString("ssid") : null;
+            TargetStop t = new TargetStop(
                     o.optString("stopId"),
                     o.optString("stopName"),
                     o.optDouble("lat",    0),
                     o.optDouble("lon",    0),
-                    (float) o.optDouble("radius", 300),
-                    o.has("ssid") ? o.optString("ssid") : null
+                    (float) radius,
+                    ssid != null && !ssid.isEmpty() ? ssid : null,
+                    o.optBoolean("routeLeg", false),
+                    o.has("alarmStyle") ? o.optString("alarmStyle") : null
             );
+            if (o.has("mode")) t.mode = o.optString("mode");
+            return t;
         }
     }
 }

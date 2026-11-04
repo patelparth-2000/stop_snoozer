@@ -43,6 +43,20 @@ public class CommuteAlarmReceiver extends BroadcastReceiver {
         int    minute       = intent.getIntExtra("minute", 0);
         String tripGroupId  = intent.getStringExtra("tripGroupId");
 
+        // ── Trip group: start the whole trip natively ──────────────────────
+        // Read before rescheduling/removal below, which rewrite the record.
+        // Without this only the first stop was armed, and the rest of the trip
+        // existed only if the user happened to open the app afterwards.
+        String routeJson = AlarmScheduler.routeJsonFor(context, alarmId);
+        if (routeJson != null) {
+            Intent routeIntent = new Intent(context, SnoozeTrackingService.class);
+            routeIntent.setAction(SnoozeTrackingService.ACTION_START_ROUTE);
+            routeIntent.putExtra(SnoozeTrackingService.EXTRA_ROUTE_JSON, routeJson);
+            ContextCompat.startForegroundService(context, routeIntent);
+            rescheduleOrRemove(context, alarmId, weekdays, specificDate);
+            return;
+        }
+
         // ── Launch the tracking service ────────────────────────────────────
         // ACTION_ADD_TARGET merges this stop with any already-active tracking targets
         // so manual saved-location tracking is not interrupted by a scheduled alarm.
@@ -66,7 +80,12 @@ public class CommuteAlarmReceiver extends BroadcastReceiver {
                    .apply();
         }
 
-        // ── Reschedule the next weekly occurrence ──────────────────────────
+        rescheduleOrRemove(context, alarmId, weekdays, specificDate);
+    }
+
+    /** Reschedules the next weekly occurrence, or forgets a one-off alarm. */
+    private static void rescheduleOrRemove(Context context, String alarmId,
+                                           String weekdays, String specificDate) {
         boolean isRecurring = specificDate == null || specificDate.isEmpty();
         if (isRecurring && alarmId != null && weekdays != null) {
             AlarmScheduler.rescheduleNext(context, alarmId);

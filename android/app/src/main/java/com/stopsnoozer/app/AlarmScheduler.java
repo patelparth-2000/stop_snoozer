@@ -32,10 +32,10 @@ public class AlarmScheduler {
             double lat, double lon,
             String ssid, float radius,
             String weekdaysJson, String specificDate,
-            String tripGroupId) {
+            String tripGroupId, String routeJson) {
 
         save(ctx, alarmId, hour, minute, stopId, stopName,
-                lat, lon, ssid, radius, weekdaysJson, specificDate, tripGroupId);
+                lat, lon, ssid, radius, weekdaysJson, specificDate, tripGroupId, routeJson);
 
         long fireAt = nextFireTime(hour, minute, weekdaysJson, specificDate);
         if (fireAt < 0) return;
@@ -111,7 +111,8 @@ public class AlarmScheduler {
                     (float) a.optDouble("radius", 500.0),
                     a.getString("weekdays"),
                     a.optString("specificDate", null),
-                    a.optString("tripGroupId", null));
+                    a.optString("tripGroupId", null),
+                    a.optString("routeJson", null));
         } catch (JSONException ignored) {}
     }
 
@@ -145,7 +146,8 @@ public class AlarmScheduler {
                         (float) a.optDouble("radius", 500.0),
                         a.getString("weekdays"),
                         a.optString("specificDate", null),
-                        a.optString("tripGroupId", null));
+                        a.optString("tripGroupId", null),
+                    a.optString("routeJson", null));
             } catch (JSONException ignored) {}
         }
     }
@@ -158,7 +160,7 @@ public class AlarmScheduler {
             double lat, double lon,
             String ssid, float radius,
             String weekdaysJson, String specificDate,
-            String tripGroupId) {
+            String tripGroupId, String routeJson) {
         SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String existing = prefs.getString(KEY_ALARMS, "{}");
         try {
@@ -177,9 +179,29 @@ public class AlarmScheduler {
                 a.put("specificDate", specificDate);
             if (tripGroupId != null && !tripGroupId.isEmpty())
                 a.put("tripGroupId", tripGroupId);
+            if (routeJson != null && !routeJson.isEmpty())
+                a.put("routeJson", routeJson);
             all.put(alarmId, a);
             prefs.edit().putString(KEY_ALARMS, all.toString()).apply();
         } catch (JSONException ignored) {}
+    }
+
+    /**
+     * The stops of the trip group this alarm starts, as the JSON array
+     * {@link SnoozeTrackingService#ACTION_START_ROUTE} takes, or null.
+     */
+    static String routeJsonFor(Context ctx, String alarmId) {
+        if (alarmId == null) return null;
+        SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        try {
+            JSONObject all = new JSONObject(prefs.getString(KEY_ALARMS, "{}"));
+            JSONObject a = all.optJSONObject(alarmId);
+            if (a == null || !a.has("routeJson")) return null;
+            String r = a.optString("routeJson", "");
+            return r.isEmpty() ? null : r;
+        } catch (JSONException e) {
+            return null;
+        }
     }
 
     static void remove(Context ctx, String alarmId) {

@@ -69,7 +69,6 @@ final appRouter = GoRouter(
               stop: stop,
               distanceMetres: distance,
               initialCountdown: initialCountdown,
-              onDismissed: _dashboardCubit.advanceLeg,
             ),
             child: const AlarmScreen(),
           ),
