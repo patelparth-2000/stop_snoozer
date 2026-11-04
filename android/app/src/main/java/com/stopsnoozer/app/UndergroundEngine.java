@@ -189,6 +189,17 @@ final class UndergroundEngine implements SensorEventListener {
     private long   lastArrivalElapsedMs;
     private boolean finished;
 
+    /**
+     * True once {@link #lastArrivalElapsedMs} marks a real arrival (or a
+     * restored checkpoint of one), rather than the moment tracking started.
+     *
+     * <p>Until then the clock includes however long the user spent walking to
+     * the platform and waiting for a train, so elapsed time is only an upper
+     * bound on the first leg's travel time. That keeps the timing floor valid
+     * but makes the ceiling meaningless — see {@link #timingWindowSatisfied}.
+     */
+    private boolean legStartKnown = false;
+
     /** Baseline surface pressure, captured before descending. */
     private double surfacePressureHpa = Double.NaN;
 
@@ -457,9 +468,19 @@ final class UndergroundEngine implements SensorEventListener {
         }
         long floorMs = (long) (next.runTimeSecondsFromPrev * 1000L
                 * RUN_TIME_FLOOR_FRACTION);
+        if (elapsedMs < floorMs) return false;
+
+        // First leg, clock started at "Start Tracking" rather than departure:
+        // the platform wait is unbounded, so a long wait would push every real
+        // arrival past the ceiling. Each rejection costs no confidence, so the
+        // tracker would sit at the boarding station at full confidence and
+        // never alarm — a silent miss. Apply the ceiling only once the clock
+        // starts from a real arrival.
+        if (!legStartKnown) return true;
+
         long ceilingMs = (long) (next.ceilingRunTimeSeconds() * 1000L
                 * RUN_TIME_CEILING_FRACTION);
-        return elapsedMs >= floorMs && elapsedMs <= ceilingMs;
+        return elapsedMs <= ceilingMs;
     }
 
     /**
@@ -544,6 +565,7 @@ final class UndergroundEngine implements SensorEventListener {
     private void advanceTo(int index, long nowElapsed) {
         currentIndex = index;
         lastArrivalElapsedMs = nowElapsed;
+        legStartKnown = true;
 
         // Re-anchor the barometric reference to this platform. Every subsequent
         // match is then a single-leg altitude difference, which neither
@@ -624,6 +646,9 @@ final class UndergroundEngine implements SensorEventListener {
         if (index < 0 || index >= plan.size()) return;
         currentIndex = index;
         lastArrivalElapsedMs = SystemClock.elapsedRealtime() - msSinceArrival;
+        // Checkpoints are written only on real arrivals or fixes, so the
+        // restored clock is anchored to one.
+        legStartKnown = true;
         // The pressure history died with the process; whatever we sample next
         // is not a platform reading. Abstain until a real arrival re-anchors.
         anchorPressureHpa = Double.NaN;
@@ -707,6 +732,7 @@ final class UndergroundEngine implements SensorEventListener {
         currentIndex = index;
         confidence = CONFIDENCE_START;
         lastArrivalElapsedMs = SystemClock.elapsedRealtime();
+        legStartKnown = true;
         if (!Double.isNaN(smoothedPressureHpa)) {
             anchorPressureHpa = smoothedPressureHpa;
             anchorIsPlatform = true;
